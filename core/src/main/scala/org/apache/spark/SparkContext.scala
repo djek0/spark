@@ -208,9 +208,15 @@ class SparkContext(config: SparkConf) extends Logging {
   private var _hadoopConfiguration: Configuration = _
   private var _executorMemory: Int = _
   private var _schedulerBackend: SchedulerBackend = _
+ 
   private var _taskScheduler: TaskScheduler = _
+  private var _taskScheduler2: TaskScheduler = _ 
+ 
   private var _heartbeatReceiver: RpcEndpointRef = _
+  
   @volatile private var _dagScheduler: DAGScheduler = _
+  @volatile private var _dagScheduler2: DAGScheduler = _ 
+ 
   private var _applicationId: String = _
   private var _applicationAttemptId: Option[String] = None
   private var _eventLogger: Option[EventLoggingListener] = None

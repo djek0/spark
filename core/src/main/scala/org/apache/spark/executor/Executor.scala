@@ -240,6 +240,7 @@ private[spark] class Executor(
 
   def launchTask(context: ExecutorBackend, taskDescription: TaskDescription): Unit = {
     val tr = new TaskRunner(context, taskDescription)
+    logInfo(s"[EXTRA LOG][EXECUTOR.scala/launchTask] called launchTask function for task ${taskDescription.taskId}")
     runningTasks.put(taskDescription.taskId, tr)
     threadPool.execute(tr)
   }
@@ -316,7 +317,7 @@ private[spark] class Executor(
   class TaskRunner(
       execBackend: ExecutorBackend,
       private val taskDescription: TaskDescription)
-    extends Runnable {
+    extends Runnable{
 
     val taskId = taskDescription.taskId
     val threadName = s"Executor task launch worker for task $taskId"
@@ -454,15 +455,18 @@ private[spark] class Executor(
           threadMXBean.getCurrentThreadCpuTime
         } else 0L
         var threwException = true
+        logInfo(s"[EXTRA LOG][Executor.scala/taskRunnerClass/run function] "+ 
+                s"starting running task ${taskId} on executor (probably ? )")
         val value = Utils.tryWithSafeFinally {
           val res = task.run(
             taskAttemptId = taskId,
             attemptNumber = taskDescription.attemptNumber,
             metricsSystem = env.metricsSystem,
             resources = taskDescription.resources)
-          threwException = false
-          res
-        } {
+            threwException = false
+            res
+        } 
+         {
           val releasedLocks = env.blockManager.releaseAllLocksForTask(taskId)
           val freedMemory = taskMemoryManager.cleanUpAllAllocatedMemory()
 
@@ -589,12 +593,15 @@ private[spark] class Executor(
             ser.serialize(new IndirectTaskResult[Any](blockId, resultSize))
           } else {
             logInfo(s"Finished $taskName (TID $taskId). $resultSize bytes result sent to driver")
+            //logInfo(s"[EXTRA LOG][in task run] direct result hash (for TID ${taskId}) serialised: [${serializedDirectResult.hashCode()}]")
             serializedDirectResult
           }
         }
-
         executorSource.SUCCEEDED_TASKS.inc(1L)
         setTaskFinishedAndClearInterruptStatus()
+        logInfo(s"[EXTRA LOG][in task run] result hash (for TID ${taskId}) serialised: [${serializedResult.hashCode()}]")
+        logInfo(s"[EXTRA LOG][in task run] calling command [execBackend.statusUpdate]" +
+                s"(probably submit result back to scheduler? )!")
         execBackend.statusUpdate(taskId, TaskState.FINISHED, serializedResult)
       } catch {
         case t: TaskKilledException =>

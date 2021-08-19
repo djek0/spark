@@ -21,6 +21,9 @@ private[spark] object TaskState extends Enumeration {
 
   val LAUNCHING, RUNNING, FINISHED, FAILED, KILLED, LOST = Value
 
+  //val LAUNCHING, RUNNING, FINISHED, FAILED, KILLED, LOST, VERIFIED = Value
+  //private val FINISHED_STATES = Set(FINISHED, FAILED, KILLED, LOST, VERIFIED)
+
   private val FINISHED_STATES = Set(FINISHED, FAILED, KILLED, LOST)
 
   type TaskState = Value

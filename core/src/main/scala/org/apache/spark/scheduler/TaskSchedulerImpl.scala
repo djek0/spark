@@ -368,6 +368,8 @@ private[spark] class TaskSchedulerImpl(
               // The executor address is expected to be non empty.
               addressesWithDescs += (shuffledOffers(i).address.get -> task)
             }
+            logInfo(s"[EXTRA LOG][in TaskSchedImpl/resourceOfferSingleTaskSet] Launching Task ${tid} " + 
+                    s"on host ${host} over the partition ${task.partitionId}")
             launchedTask = true
           }
         } catch {

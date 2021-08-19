@@ -147,7 +147,9 @@ private[spark] class CoarseGrainedExecutorBackend(
   override def receive: PartialFunction[Any, Unit] = {
     case RegisteredExecutor =>
       logInfo("Successfully registered with driver")
+      logInfo("[EXTRA LOG][coarse grained executor backEnd receive function call!]")
       try {
+        logInfo("[EXTRA LOG][CoarseGrained executor/ receive fun] try block for creating executor")
         executor = new Executor(executorId, hostname, env, userClassPath, isLocal = false,
           resources = _resources)
         driver.get.send(LaunchedExecutor(executorId))
@@ -210,6 +212,7 @@ private[spark] class CoarseGrainedExecutorBackend(
 
   override def statusUpdate(taskId: Long, state: TaskState, data: ByteBuffer): Unit = {
     val resources = taskResources.getOrElse(taskId, Map.empty[String, ResourceInformation])
+    logInfo("[EXTRA LOG][CoarseGrainedExecutorBackend/statuusUpdate] calling StatusUpdate() function")
     val msg = StatusUpdate(executorId, taskId, state, data, resources)
     if (TaskState.isFinished(state)) {
       taskResources.remove(taskId)
@@ -263,6 +266,7 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
       resourceProfileId: Int)
 
   def main(args: Array[String]): Unit = {
+    logInfo("[EXTRA LOG][CoarseGrainedExecutorBackend] running main function.")
     val createFn: (RpcEnv, Arguments, SparkEnv, ResourceProfile) =>
       CoarseGrainedExecutorBackend = { case (rpcEnv, arguments, env, resourceProfile) =>
       new CoarseGrainedExecutorBackend(rpcEnv, arguments.driverUrl, arguments.executorId,
@@ -394,6 +398,13 @@ private[spark] object CoarseGrainedExecutorBackend extends Logging {
           printUsageAndExit(classNameForEntry)
       }
     }
+
+
+    logInfo(s"[EXTRA LOG][CoarseGrainedExecutorBackend/parse args function] " + 
+            s"executor Id: $executorId " + 
+            s"hostname: $hostname " + 
+            s"app Id: $appId" )
+
 
     if (hostname == null) {
       hostname = Utils.localHostName()
