@@ -19,16 +19,17 @@ package org.apache.spark
 
 private[spark] object TaskState extends Enumeration {
 
-  val LAUNCHING, RUNNING, FINISHED, FAILED, KILLED, LOST = Value
+  //val LAUNCHING, RUNNING, FINISHED, FAILED, KILLED, LOST = Value
+  //private val FINISHED_STATES = Set(FINISHED, FAILED, KILLED, LOST)
 
-  //val LAUNCHING, RUNNING, FINISHED, FAILED, KILLED, LOST, VERIFIED = Value
-  //private val FINISHED_STATES = Set(FINISHED, FAILED, KILLED, LOST, VERIFIED)
-
-  private val FINISHED_STATES = Set(FINISHED, FAILED, KILLED, LOST)
+  val LAUNCHING, RUNNING, FINISHED, FAILED, KILLED, LOST, VERIFIED = Value
+  private val FINISHED_STATES = Set(FINISHED, FAILED, KILLED, LOST, VERIFIED)
 
   type TaskState = Value
 
   def isFailed(state: TaskState): Boolean = (LOST == state) || (FAILED == state)
 
   def isFinished(state: TaskState): Boolean = FINISHED_STATES.contains(state)
+
+  def isVerified(state: TaskState): Boolean = FINISHED_STATES.contains(state)
 }

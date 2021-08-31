@@ -43,6 +43,8 @@ import org.apache.spark.storage._
 import org.apache.spark.storage.BlockManagerMessages.BlockManagerHeartbeat
 import org.apache.spark.util._
 
+import org.apache.spark.contract
+
 /**
  * The high-level scheduling layer that implements stage-oriented scheduling. It computes a DAG of
  * stages for each job, keeps track of which RDDs and stage outputs are materialized, and finds a
@@ -717,7 +719,7 @@ private[spark] class DAGScheduler(
     }
 
     val jobId = nextJobId.getAndIncrement()
-    logInfo("[EXTRA LOG][In submit job]")
+    logInfo(s"[EXTRA LOG][In submit job] for job with id = ${jobId}")
     if (partitions.isEmpty) {
       val clonedProperties = Utils.cloneProperties(properties)
       if (sc.getLocalProperty(SparkContext.SPARK_JOB_DESCRIPTION) == null) {
@@ -1277,8 +1279,10 @@ private[spark] class DAGScheduler(
       logInfo(s"Submitting ${tasks.size} missing tasks from $stage (${stage.rdd}) (first 15 " +
         s"tasks are for partitions ${tasks.take(15).map(_.partitionId)})")
       logInfo(s"[EXTRA LOG] Submitting Tasks to taskScheduler. (line ~1279)")
+      
       taskScheduler.submitTasks(new TaskSet(
         tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties))
+      
     } else {
       // Because we posted SparkListenerStageSubmitted earlier, we should mark
       // the stage as completed here in case there are no tasks to run

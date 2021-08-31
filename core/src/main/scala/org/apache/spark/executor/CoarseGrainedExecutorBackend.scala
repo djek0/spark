@@ -163,6 +163,7 @@ private[spark] class CoarseGrainedExecutorBackend(
         exitExecutor(1, "Received LaunchTask command but executor was null")
       } else {
         val taskDesc = TaskDescription.decode(data.value)
+        logInfo(s"[EXTRA LOG][Exec. Backend/receive] got LaunchTask command for task ${taskDesc.taskId}")
         logInfo("Got assigned task " + taskDesc.taskId)
         taskResources(taskDesc.taskId) = taskDesc.resources
         executor.launchTask(this, taskDesc)

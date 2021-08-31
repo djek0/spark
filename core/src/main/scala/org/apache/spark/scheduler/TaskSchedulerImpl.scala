@@ -215,6 +215,7 @@ private[spark] class TaskSchedulerImpl(
   override def submitTasks(taskSet: TaskSet): Unit = {
     val tasks = taskSet.tasks
     logInfo("Adding task set " + taskSet.id + " with " + tasks.length + " tasks")
+    logInfo(s"[EXTRA LOG][submitTasks] taskSet ${taskSet.id} with ${tasks.length} tasks")
     this.synchronized {
       val manager = createTaskSetManager(taskSet, maxTaskFailures)
       val stage = taskSet.stageId
@@ -351,9 +352,12 @@ private[spark] class TaskSchedulerImpl(
           for (task <- taskSet.resourceOffer(execId, host, maxLocality, availableResources(i))) {
             tasks(i) += task
             val tid = task.taskId
+            logInfo(s"[EXTRA LOG]assigning task ${tid} to host ${host}")
             taskIdToTaskSetManager.put(tid, taskSet)
             taskIdToExecutorId(tid) = execId
             executorIdToRunningTaskIds(execId).add(tid)
+            //availableCpus(i) -= CPUS_PER_TASK
+            //executorIdToRunningTaskIds(execId).add(tid)
             availableCpus(i) -= CPUS_PER_TASK
             assert(availableCpus(i) >= 0)
             task.resources.foreach { case (rName, rInfo) =>

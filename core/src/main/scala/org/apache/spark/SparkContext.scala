@@ -2114,6 +2114,7 @@ class SparkContext(config: SparkConf) extends Logging {
     val callSite = getCallSite
     val cleanedFunc = clean(func)
     logInfo("Starting job: " + callSite.shortForm)
+    logInfo(s"[EXTRA LOG][SparkContext/run] calling run() function and submitting to DAG")
     if (conf.getBoolean("spark.logLineage", false)) {
       logInfo("RDD's recursive dependencies:\n" + rdd.toDebugString)
     }
@@ -2262,6 +2263,7 @@ class SparkContext(config: SparkConf) extends Logging {
       resultFunc: => R): SimpleFutureAction[R] =
   {
     assertNotStopped()
+    logInfo(s"[EXTRA LOG][SparkContext] running submitJob() method")
     val cleanF = clean(processPartition)
     val callSite = getCallSite
     val waiter = dagScheduler.submitJob(

@@ -436,6 +436,13 @@
       <scope>test</scope>
     </dependency>
 
+    <!-- https://mvnrepository.com/artifact/org.web3j/core -->
+    <dependency>
+        <groupId>org.web3j</groupId>
+        <artifactId>core</artifactId>
+        <version>5.0.0</version>
+    </dependency>
+
     <!--
       This spark-tags test-dep is needed even though it isn't used in this module, otherwise testing-cmds that exclude
       them will yield errors.
