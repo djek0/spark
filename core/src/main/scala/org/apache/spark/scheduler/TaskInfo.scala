@@ -70,6 +70,8 @@ class TaskInfo(
 
   var killed = false
 
+  var verified = false
+
   private[spark] def markGettingResult(time: Long): Unit = {
     gettingResultTime = time
   }
@@ -92,6 +94,9 @@ class TaskInfo(
   def successful: Boolean = finished && !failed && !killed
 
   def running: Boolean = !finished
+
+  // TODO: When is a task considered verified and how to declare it?? 
+  //def verified: Boolean = ??? 
 
   def status: String = {
     if (running) {
