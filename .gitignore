@@ -100,3 +100,6 @@ spark-warehouse/
 
 # For SBT
 .jvmopts
+
+#added by john 
+build/openjdk-*

@@ -16,8 +16,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
 # Determine the current working directory
+export JAVA_HOME="/opt/spark/build/openjdk-11.0.2_linux-x64_bin/jdk-11.0.2/"
+echo "using java from $JAVA_HOME"
 _DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # Preserve the calling directory
 _CALLING_DIR="$(pwd)"
