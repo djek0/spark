@@ -1255,17 +1255,12 @@ private[spark] class DAGScheduler(
               taskBinary, part, locs, properties, serializedTaskMetrics, Option(jobId),
               Option(sc.applicationId), sc.applicationAttemptId, stage.rdd.isBarrier())
           }
-
         case stage: ResultStage =>
-          partitionsToCompute.map { id =>
+          partitionsToCompute.flatMap { id =>
             val p: Int = stage.partitions(id)
             val part = partitions(p)
             val locs = taskIdToLocations(id)
-            logInfo(s"[EXTRA LOG] creating new ResultTask")   
-            new ResultTask(stage.id, stage.latestInfo.attemptNumber,
-              taskBinary, part, locs, id, properties, serializedTaskMetrics,
-              Option(jobId), Option(sc.applicationId), sc.applicationAttemptId,
-              stage.rdd.isBarrier())
+            logInfo(s"[EXTRA LOG] creating new ResultTask")    
           }
       }
     } catch {

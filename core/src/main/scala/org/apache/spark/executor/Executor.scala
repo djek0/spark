@@ -508,7 +508,8 @@ private[spark] class Executor(
 
         val resultSer = env.serializer.newInstance()
         val beforeSerializationNs = System.nanoTime()
-        val valueBytes = resultSer.serialize(value)
+        val valueBytes = resultSer.serialize(value).compact()
+        
         val afterSerializationNs = System.nanoTime()
 
         // Deserialization happens in two parts: first, we deserialize a Task object, which
@@ -597,11 +598,11 @@ private[spark] class Executor(
             serializedDirectResult
           }
         }
+        logInfo(s"[EXTRA LOG][in task run] result hash (for TID ${taskId}) serialised: [${valueBytes.hashCode()}]")
+        logInfo(s"[EXTRA LOG][in task run] first element of buffer for TID ${taskId} is [${valueBytes.arrayOffset()}]")
+
         executorSource.SUCCEEDED_TASKS.inc(1L)
-        setTaskFinishedAndClearInterruptStatus()
-        logInfo(s"[EXTRA LOG][in task run] result hash (for TID ${taskId}) serialised: [${serializedResult.hashCode()}]")
-        logInfo(s"[EXTRA LOG][in task run] calling command [execBackend.statusUpdate]" +
-                s"(probably submit result back to scheduler? )!")
+        setTaskFinishedAndClearInterruptStatus()        
         execBackend.statusUpdate(taskId, TaskState.FINISHED, serializedResult)
       } catch {
         case t: TaskKilledException =>

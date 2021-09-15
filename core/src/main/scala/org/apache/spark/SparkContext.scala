@@ -215,7 +215,6 @@ class SparkContext(config: SparkConf) extends Logging {
   private var _heartbeatReceiver: RpcEndpointRef = _
   
   @volatile private var _dagScheduler: DAGScheduler = _
-  @volatile private var _dagScheduler2: DAGScheduler = _ 
  
   private var _applicationId: String = _
   private var _applicationAttemptId: Option[String] = None
@@ -315,7 +314,10 @@ class SparkContext(config: SparkConf) extends Logging {
 
   private[spark] def schedulerBackend: SchedulerBackend = _schedulerBackend
 
+
+  logInfo(s"[EXTRA LOG][LINE 318] created 2 TaskSchedulers")
   private[spark] def taskScheduler: TaskScheduler = _taskScheduler
+  private[spark] def taskScheduler2: TaskScheduler = _taskScheduler2
   private[spark] def taskScheduler_=(ts: TaskScheduler): Unit = {
     _taskScheduler = ts
   }
