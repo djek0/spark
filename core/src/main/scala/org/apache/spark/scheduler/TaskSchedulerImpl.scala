@@ -374,6 +374,7 @@ private[spark] class TaskSchedulerImpl(
             }
             logInfo(s"[EXTRA LOG][in TaskSchedImpl/resourceOfferSingleTaskSet] Launching Task ${tid} " + 
                     s"on host ${host} over the partition ${task.partitionId}")
+            
             launchedTask = true
           }
         } catch {

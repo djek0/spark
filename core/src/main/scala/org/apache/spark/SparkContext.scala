@@ -208,6 +208,7 @@ class SparkContext(config: SparkConf) extends Logging {
   private var _hadoopConfiguration: Configuration = _
   private var _executorMemory: Int = _
   private var _schedulerBackend: SchedulerBackend = _
+  private var _schedulerBackend2: SchedulerBackend = _
  
   private var _taskScheduler: TaskScheduler = _
   private var _taskScheduler2: TaskScheduler = _ 
@@ -321,6 +322,12 @@ class SparkContext(config: SparkConf) extends Logging {
   private[spark] def taskScheduler_=(ts: TaskScheduler): Unit = {
     _taskScheduler = ts
   }
+
+  /*
+  private[spark] def taskScheduler2_=(ts: TaskScheduler): Unit = {
+    _taskScheduler2 = ts
+  }
+  */
 
   private[spark] def dagScheduler: DAGScheduler = _dagScheduler
   private[spark] def dagScheduler_=(ds: DAGScheduler): Unit = {
@@ -546,9 +553,16 @@ class SparkContext(config: SparkConf) extends Logging {
 
     // Create and start the scheduler
     val (sched, ts) = SparkContext.createTaskScheduler(this, master, deployMode)
+    //val (sched2,ts2) = SparkContext.createTaskScheduler(this, master, deployMode)
     _schedulerBackend = sched
     _taskScheduler = ts
+    
+
+    //_schedulerBackend2 = sched2
+    //_taskScheduler2 = ts2
+    
     _dagScheduler = new DAGScheduler(this)
+
     _heartbeatReceiver.ask[Boolean](TaskSchedulerIsSet)
 
     val _executorMetricsSource =

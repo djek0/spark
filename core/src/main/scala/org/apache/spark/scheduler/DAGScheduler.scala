@@ -1249,6 +1249,7 @@ private[spark] class DAGScheduler(
           partitionsToCompute.map { id =>
             val locs = taskIdToLocations(id)
             val part = partitions(id)
+            logInfo(s"[EXTRA LOG] prefered locations: ${locs}")
             logInfo(s"[EXTRA LOG] creating new ShuffleMapTask")
             stage.pendingPartitions += id
             new ShuffleMapTask(stage.id, stage.latestInfo.attemptNumber,
@@ -1256,11 +1257,16 @@ private[spark] class DAGScheduler(
               Option(sc.applicationId), sc.applicationAttemptId, stage.rdd.isBarrier())
           }
         case stage: ResultStage =>
-          partitionsToCompute.flatMap { id =>
+          partitionsToCompute.map { id =>
             val p: Int = stage.partitions(id)
             val part = partitions(p)
             val locs = taskIdToLocations(id)
-            logInfo(s"[EXTRA LOG] creating new ResultTask")    
+            logInfo(s"[EXTRA LOG] prefered locations: ${locs}")
+            logInfo(s"[EXTRA LOG] creating new ResultTask")   
+            new ResultTask(stage.id, stage.latestInfo.attemptNumber,
+              taskBinary, part, locs, id, properties, serializedTaskMetrics,
+              Option(jobId), Option(sc.applicationId), sc.applicationAttemptId,
+              stage.rdd.isBarrier()) 
           }
       }
     } catch {
@@ -1277,6 +1283,9 @@ private[spark] class DAGScheduler(
       
       taskScheduler.submitTasks(new TaskSet(
         tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties))
+
+     // sc.taskScheduler2.submitTasks(new TaskSet(
+     //   tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties))
       
     } else {
       // Because we posted SparkListenerStageSubmitted earlier, we should mark

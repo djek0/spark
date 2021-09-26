@@ -22,6 +22,8 @@ import java.lang.Thread.UncaughtExceptionHandler
 import java.lang.management.ManagementFactory
 import java.net.{URI, URL}
 import java.nio.ByteBuffer
+import java.nio._
+import java.util._
 import java.util.Properties
 import java.util.concurrent._
 import java.util.concurrent.atomic.AtomicBoolean
@@ -508,7 +510,7 @@ private[spark] class Executor(
 
         val resultSer = env.serializer.newInstance()
         val beforeSerializationNs = System.nanoTime()
-        val valueBytes = resultSer.serialize(value).compact()
+        val valueBytes = resultSer.serialize(value)
         
         val afterSerializationNs = System.nanoTime()
 
@@ -598,9 +600,10 @@ private[spark] class Executor(
             serializedDirectResult
           }
         }
-        logInfo(s"[EXTRA LOG][in task run] result hash (for TID ${taskId}) serialised: [${valueBytes.hashCode()}]")
+        logInfo(s"[EXTRA LOG][in task run] result hash (for TID ${taskId}) serialised:" +
+                s"[${Arrays.toString(valueBytes.array())}]")
         logInfo(s"[EXTRA LOG][in task run] first element of buffer for TID ${taskId} is [${valueBytes.arrayOffset()}]")
-
+        logInfo(s"value bytes: ${valueBytes}")
         executorSource.SUCCEEDED_TASKS.inc(1L)
         setTaskFinishedAndClearInterruptStatus()        
         execBackend.statusUpdate(taskId, TaskState.FINISHED, serializedResult)
