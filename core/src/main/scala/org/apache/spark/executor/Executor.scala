@@ -601,9 +601,9 @@ private[spark] class Executor(
           }
         }
         logInfo(s"[EXTRA LOG][in task run] result hash (for TID ${taskId}) serialised:" +
-                s"[${Arrays.toString(valueBytes.array())}]")
-        logInfo(s"[EXTRA LOG][in task run] first element of buffer for TID ${taskId} is [${valueBytes.arrayOffset()}]")
-        logInfo(s"value bytes: ${valueBytes}")
+                s"[${Arrays.toString(valueBytes.array()).hashCode()}]")
+        //logInfo(s"[EXTRA LOG][in task run] first element of buffer for TID ${taskId} is [${valueBytes.arrayOffset()}]")
+        //logInfo(s"value bytes: ${valueBytes}")
         executorSource.SUCCEEDED_TASKS.inc(1L)
         setTaskFinishedAndClearInterruptStatus()        
         execBackend.statusUpdate(taskId, TaskState.FINISHED, serializedResult)

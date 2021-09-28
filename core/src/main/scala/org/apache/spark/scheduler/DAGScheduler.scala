@@ -1246,27 +1246,40 @@ private[spark] class DAGScheduler(
       stage match {
         case stage: ShuffleMapStage =>
           stage.pendingPartitions.clear()
-          partitionsToCompute.map { id =>
+          partitionsToCompute.flatMap { id =>
             val locs = taskIdToLocations(id)
             val part = partitions(id)
             logInfo(s"[EXTRA LOG] prefered locations: ${locs}")
             logInfo(s"[EXTRA LOG] creating new ShuffleMapTask")
             stage.pendingPartitions += id
-            new ShuffleMapTask(stage.id, stage.latestInfo.attemptNumber,
-              taskBinary, part, locs, properties, serializedTaskMetrics, Option(jobId),
-              Option(sc.applicationId), sc.applicationAttemptId, stage.rdd.isBarrier())
+            Seq[Task[_]](
+              new ShuffleMapTask(stage.id, stage.latestInfo.attemptNumber,
+                taskBinary, part, locs, properties, serializedTaskMetrics, Option(jobId),
+                Option(sc.applicationId), sc.applicationAttemptId, stage.rdd.isBarrier())
+              ,
+              new ShuffleMapTask(stage.id, stage.latestInfo.attemptNumber,
+                taskBinary, part, locs, properties, serializedTaskMetrics, Option(jobId),
+                Option(sc.applicationId), sc.applicationAttemptId, stage.rdd.isBarrier())
+            )
           }
         case stage: ResultStage =>
-          partitionsToCompute.map { id =>
+          partitionsToCompute.flatMap { id =>
             val p: Int = stage.partitions(id)
             val part = partitions(p)
             val locs = taskIdToLocations(id)
             logInfo(s"[EXTRA LOG] prefered locations: ${locs}")
-            logInfo(s"[EXTRA LOG] creating new ResultTask")   
-            new ResultTask(stage.id, stage.latestInfo.attemptNumber,
+            logInfo(s"[EXTRA LOG] creating new ResultTask")
+            Seq[Task[_]](   
+              new ResultTask(stage.id, stage.latestInfo.attemptNumber,
+                taskBinary, part, locs, id, properties, serializedTaskMetrics,
+                Option(jobId), Option(sc.applicationId), sc.applicationAttemptId,
+                stage.rdd.isBarrier()) 
+              ,
+              new ResultTask(stage.id, stage.latestInfo.attemptNumber,
               taskBinary, part, locs, id, properties, serializedTaskMetrics,
               Option(jobId), Option(sc.applicationId), sc.applicationAttemptId,
-              stage.rdd.isBarrier()) 
+              stage.rdd.isBarrier())
+            ) 
           }
       }
     } catch {
