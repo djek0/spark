@@ -80,6 +80,18 @@ private[spark] class SparkSubmit extends Logging {
   def doSubmit(args: Array[String]): Unit = {
     // Initialize logging if it hasn't been done yet. Keep track of whether logging needs to
     // be reset before the application starts.
+
+    val testThread = new Thread{
+      override def run {
+        for( i <- range(10)) {
+          println("[THREAD] in the thread!")
+        }
+      }
+      Thread.sleep(200)
+    }
+
+    testThread.start()
+
     logInfo(s"[EXTRA LOG] in SparkSubmit artifact, doSubmit function!")
     val uninitLog = initializeLogIfNecessary(true, silent = true)
 
