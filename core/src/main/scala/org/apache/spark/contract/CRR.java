@@ -1,4 +1,4 @@
-package org.apache.spark.contract;
+package contract;
 
 import io.reactivex.Flowable;
 import io.reactivex.functions.Function;
@@ -9,6 +9,7 @@ import java.util.Collections;
 import java.util.List;
 import org.web3j.abi.EventEncoder;
 import org.web3j.abi.TypeReference;
+import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Event;
 import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.Uint256;
@@ -36,25 +37,51 @@ import org.web3j.tx.gas.ContractGasProvider;
  */
 @SuppressWarnings("rawtypes")
 public class CRR extends Contract {
-    public static final String BINARY = "608060405234801561001057600080fd5b50600080546001600160a01b03191633178155600181905560028190556003556103fe8061003f6000396000f3fe6080604052600436106100545760003560e01c8062f2a3381461005957806312065fe01461009e5780631b9265b8146100b3578063485315dc146100ca578063a18caf811461010c578063f5ac1a3614610129575b600080fd5b34801561006557600080fd5b5061008c6004803603602081101561007c57600080fd5b50356001600160a01b0316610173565b60408051918252519081900360200190f35b3480156100aa57600080fd5b5061008c610185565b3480156100bf57600080fd5b506100c8610189565b005b3480156100d657600080fd5b506100c8600480360360a08110156100ed57600080fd5b5080359060208101359060408101359060608101359060800135610241565b6100c86004803603602081101561012257600080fd5b50356102b7565b34801561013557600080fd5b5061015f6004803603606081101561014c57600080fd5b5080359060208101359060400135610369565b604080519115158252519081900360200190f35b60076020526000908152604090205481565b4790565b6000546001600160a01b031633146101a057600080fd5b60005b60025481101561023e57600681815481106101ba57fe5b6000918252602082200154600680546001600160a01b03909216926108fc9260079290869081106101e757fe5b60009182526020808320909101546001600160a01b03168352820192909252604090810182205490518115909302929091818181858888f19350505050158015610235573d6000803e3d6000fd5b506001016101a3565b50565b6000546001600160a01b0316331461025857600080fd5b600482905560058190556040805186815260208101869052808201859052606081018490526080810183905290517f88db62829e9b6681455a032d7f0443bcaf35df015b8b6ed643ae216f22f8c0249181900360a00190a15050505050565b6005548110156102c657600080fd5b8034146102d257600080fd5b336006600254815481106102e257fe5b600091825260208083209190910180546001600160a01b0319166001600160a01b039490941693909317909255338152600790915260409020819055600280546001018082551061023e576001600381905560408051918252517f6152d5b257cc8f258361a4952d20583c8f6e333297294aacd9423afa38e8eb319181900360200190a150565b6000600660008154811061037957fe5b6000918252602090912001546001600160a01b03163314806103bc575060066001815481106103a457fe5b6000918252602090912001546001600160a01b031633145b6103c257fe5b939250505056fea265627a7a72315820cea1a3741524d0cacc2890d3318ae24f5d94b50b6d575f517d7ac568c6e5c87764736f6c63430005100032";
+    public static final String BINARY = "608060405234801561001057600080fd5b50600080546001600160a01b03191633178155600181905560058190556002556008805460ff191690556105a0806100496000396000f3fe6080604052600436106100705760003560e01c8063893d20e81161004e578063893d20e8146100d6578063a4d8cf9f14610107578063ccce7e861461010f578063f637ea961461012c57610070565b806319a85cee146100755780634aa2d3311461009a5780636f9fb98a146100c1575b600080fd5b6100986004803603604081101561008b57600080fd5b508035906020013561014f565b005b3480156100a657600080fd5b506100af61029d565b60408051918252519081900360200190f35b3480156100cd57600080fd5b506100af6102a3565b3480156100e257600080fd5b506100eb6102a7565b604080516001600160a01b039092168252519081900360200190f35b6100986102b6565b6100986004803603602081101561012557600080fd5b503561035d565b6100986004803603604081101561014257600080fd5b50803590602001356104f6565b600082815260096020526040902054600211156101b3576040805162461bcd60e51b815260206004820152601b60248201527f77616974696e6720666f72206f74686572206578656375746f72730000000000604482015290519081900360640190fd5b6000828152600a60205260409020546101ec576000828152600a6020908152604082208054600181018255908352912001819055610299565b6000828152600a602052604090205460011415610299576000828152600a60205260408120805483929061021c57fe5b90600052602060002001541415610265576040805183815290517ff9e4dee4a5cc23666c62364fb0568dcd7894c6a5ddd71c7d1be396f13edb161d9181900360200190a1610299565b6040805183815290517f5c294404c99ce75d2421c81d85219cee4cf20cae2e12e44b2d966a69d4a9a5e69181900360200190a15b5050565b60055490565b4790565b6000546001600160a01b031690565b600060065411610303576040805162461bcd60e51b81526020600482015260136024820152721a9bd8881b9bdd081e595d081cdd185c9d1959606a1b604482015290519081900360640190fd5b6007546006541461034e576040805162461bcd60e51b815260206004820152601060248201526f6a6f62206e6f742079657420646f6e6560801b604482015290519081900360640190fd5b6008805460ff19169055600080fd5b60045434101561036c57600080fd5b6000818152600960205260409020546002116103c3576040805162461bcd60e51b81526020600482015260116024820152701c9959da5cdd1c985d1a5bdb88199d5b1b607a1b604482015290519081900360640190fd5b60008181526009602052604090205461043f57600081815260096020908152604080832080546001810182559084529282902090920180546001600160a01b03191633179055815183815291517fd4d94e00d7f2d81e1528ab2525d796ee69bebcdefa742063510a70e47fa3918f9281900390910190a16104f3565b600081815260096020526040902054600114156104bf57600081815260096020908152604080832080546001810182559084529282902090920180546001600160a01b03191633179055815183815291517f6152d5b257cc8f258361a4952d20583c8f6e333297294aacd9423afa38e8eb319281900390910190a16104f3565b6040805182815290517f5cea392268772376fff0b079090e4acc87ac05bf925349695372a3040fe075369181900360200190a15b50565b6000546001600160a01b0316331461050d57600080fd5b346003819055600482905533311161052457600080fd5b600354604080518481526020810192909252818101839052517f4470fbfd43622f9df45272968e4611be245225bc7816e1484843c7e7852d38349181900360600190a1505056fea265627a7a72315820ef711892cd42c8db3ab84a70069d62378548676d2aa0a401104c004f0d12256b64736f6c63430005100032";
 
-    public static final String FUNC_INITIALIZE = "Initialize";
+    public static final String FUNC_GETCONTRACTBALANCE = "getContractBalance";
 
-    public static final String FUNC_REGISTER = "Register";
+    public static final String FUNC_GETOWNER = "getOwner";
 
-    public static final String FUNC_GETBALANCE = "getBalance";
+    public static final String FUNC_GETTOTALPARTICIPANTSCOUNT = "getTotalParticipantsCount";
 
-    public static final String FUNC_PARTICIPANTAMOUNTS = "participantAmounts";
+    public static final String FUNC_INITIALIZECONTEXT = "initializeContext";
 
-    public static final String FUNC_PAY = "pay";
+    public static final String FUNC_PAYEXECUTORS = "payExecutors";
 
-    public static final String FUNC_RECEIVERESULTS = "receiveResults";
+    public static final String FUNC_REGISTEREXECUTOR = "registerExecutor";
+
+    public static final String FUNC_SUBMITRESULTS = "submitResults";
+
+    public static final Event BADRESULT_EVENT = new Event("badResult", 
+            Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
+    ;
 
     public static final Event NEWTASK_EVENT = new Event("newTask", 
-            Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}, new TypeReference<Uint256>() {}, new TypeReference<Uint256>() {}, new TypeReference<Uint256>() {}, new TypeReference<Uint256>() {}));
+            Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}, new TypeReference<Uint256>() {}, new TypeReference<Uint256>() {}));
     ;
 
     public static final Event REGISTERCOMPLETED_EVENT = new Event("registerCompleted", 
+            Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
+    ;
+
+    public static final Event REGISTERFULL_EVENT = new Event("registerFull", 
+            Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
+    ;
+
+    public static final Event REGISTEREDFOR_EVENT = new Event("registeredFor", 
+            Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
+    ;
+
+    public static final Event T_EVENT = new Event("t", 
+            Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
+    ;
+
+    public static final Event TASKRESULT_EVENT = new Event("taskResult", 
+            Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}, new TypeReference<Uint256>() {}));
+    ;
+
+    public static final Event VERIFIEDRESULT_EVENT = new Event("verifiedResult", 
             Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
     ;
 
@@ -76,17 +103,46 @@ public class CRR extends Contract {
         super(BINARY, contractAddress, web3j, transactionManager, contractGasProvider);
     }
 
+    public List<BadResultEventResponse> getBadResultEvents(TransactionReceipt transactionReceipt) {
+        List<Contract.EventValuesWithLog> valueList = extractEventParametersWithLog(BADRESULT_EVENT, transactionReceipt);
+        ArrayList<BadResultEventResponse> responses = new ArrayList<BadResultEventResponse>(valueList.size());
+        for (Contract.EventValuesWithLog eventValues : valueList) {
+            BadResultEventResponse typedResponse = new BadResultEventResponse();
+            typedResponse.log = eventValues.getLog();
+            typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+            responses.add(typedResponse);
+        }
+        return responses;
+    }
+
+    public Flowable<BadResultEventResponse> badResultEventFlowable(EthFilter filter) {
+        return web3j.ethLogFlowable(filter).map(new Function<Log, BadResultEventResponse>() {
+            @Override
+            public BadResultEventResponse apply(Log log) {
+                Contract.EventValuesWithLog eventValues = extractEventParametersWithLog(BADRESULT_EVENT, log);
+                BadResultEventResponse typedResponse = new BadResultEventResponse();
+                typedResponse.log = log;
+                typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+                return typedResponse;
+            }
+        });
+    }
+
+    public Flowable<BadResultEventResponse> badResultEventFlowable(DefaultBlockParameter startBlock, DefaultBlockParameter endBlock) {
+        EthFilter filter = new EthFilter(startBlock, endBlock, getContractAddress());
+        filter.addSingleTopic(EventEncoder.encode(BADRESULT_EVENT));
+        return badResultEventFlowable(filter);
+    }
+
     public List<NewTaskEventResponse> getNewTaskEvents(TransactionReceipt transactionReceipt) {
         List<Contract.EventValuesWithLog> valueList = extractEventParametersWithLog(NEWTASK_EVENT, transactionReceipt);
         ArrayList<NewTaskEventResponse> responses = new ArrayList<NewTaskEventResponse>(valueList.size());
         for (Contract.EventValuesWithLog eventValues : valueList) {
             NewTaskEventResponse typedResponse = new NewTaskEventResponse();
             typedResponse.log = eventValues.getLog();
-            typedResponse._task_url = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
-            typedResponse._web_hash = (BigInteger) eventValues.getNonIndexedValues().get(1).getValue();
-            typedResponse._comp_hash = (BigInteger) eventValues.getNonIndexedValues().get(2).getValue();
-            typedResponse._reward = (BigInteger) eventValues.getNonIndexedValues().get(3).getValue();
-            typedResponse._min_deposit = (BigInteger) eventValues.getNonIndexedValues().get(4).getValue();
+            typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+            typedResponse._reward = (BigInteger) eventValues.getNonIndexedValues().get(1).getValue();
+            typedResponse._min_deposit = (BigInteger) eventValues.getNonIndexedValues().get(2).getValue();
             responses.add(typedResponse);
         }
         return responses;
@@ -99,11 +155,9 @@ public class CRR extends Contract {
                 Contract.EventValuesWithLog eventValues = extractEventParametersWithLog(NEWTASK_EVENT, log);
                 NewTaskEventResponse typedResponse = new NewTaskEventResponse();
                 typedResponse.log = log;
-                typedResponse._task_url = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
-                typedResponse._web_hash = (BigInteger) eventValues.getNonIndexedValues().get(1).getValue();
-                typedResponse._comp_hash = (BigInteger) eventValues.getNonIndexedValues().get(2).getValue();
-                typedResponse._reward = (BigInteger) eventValues.getNonIndexedValues().get(3).getValue();
-                typedResponse._min_deposit = (BigInteger) eventValues.getNonIndexedValues().get(4).getValue();
+                typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+                typedResponse._reward = (BigInteger) eventValues.getNonIndexedValues().get(1).getValue();
+                typedResponse._min_deposit = (BigInteger) eventValues.getNonIndexedValues().get(2).getValue();
                 return typedResponse;
             }
         });
@@ -121,7 +175,7 @@ public class CRR extends Contract {
         for (Contract.EventValuesWithLog eventValues : valueList) {
             RegisterCompletedEventResponse typedResponse = new RegisterCompletedEventResponse();
             typedResponse.log = eventValues.getLog();
-            typedResponse._state = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+            typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
             responses.add(typedResponse);
         }
         return responses;
@@ -134,7 +188,7 @@ public class CRR extends Contract {
                 Contract.EventValuesWithLog eventValues = extractEventParametersWithLog(REGISTERCOMPLETED_EVENT, log);
                 RegisterCompletedEventResponse typedResponse = new RegisterCompletedEventResponse();
                 typedResponse.log = log;
-                typedResponse._state = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+                typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
                 return typedResponse;
             }
         });
@@ -146,56 +200,216 @@ public class CRR extends Contract {
         return registerCompletedEventFlowable(filter);
     }
 
-    public RemoteFunctionCall<TransactionReceipt> Initialize(BigInteger _task_url, BigInteger _web_hash, BigInteger _comp_hash, BigInteger _reward, BigInteger _min_deposit) {
-        final org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(
-                FUNC_INITIALIZE, 
-                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(_task_url), 
-                new org.web3j.abi.datatypes.generated.Uint256(_web_hash), 
-                new org.web3j.abi.datatypes.generated.Uint256(_comp_hash), 
-                new org.web3j.abi.datatypes.generated.Uint256(_reward), 
-                new org.web3j.abi.datatypes.generated.Uint256(_min_deposit)), 
-                Collections.<TypeReference<?>>emptyList());
-        return executeRemoteCallTransaction(function);
+    public List<RegisterFullEventResponse> getRegisterFullEvents(TransactionReceipt transactionReceipt) {
+        List<Contract.EventValuesWithLog> valueList = extractEventParametersWithLog(REGISTERFULL_EVENT, transactionReceipt);
+        ArrayList<RegisterFullEventResponse> responses = new ArrayList<RegisterFullEventResponse>(valueList.size());
+        for (Contract.EventValuesWithLog eventValues : valueList) {
+            RegisterFullEventResponse typedResponse = new RegisterFullEventResponse();
+            typedResponse.log = eventValues.getLog();
+            typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+            responses.add(typedResponse);
+        }
+        return responses;
     }
 
-    public RemoteFunctionCall<TransactionReceipt> Register(BigInteger _amount, BigInteger weiValue) {
+    public Flowable<RegisterFullEventResponse> registerFullEventFlowable(EthFilter filter) {
+        return web3j.ethLogFlowable(filter).map(new Function<Log, RegisterFullEventResponse>() {
+            @Override
+            public RegisterFullEventResponse apply(Log log) {
+                Contract.EventValuesWithLog eventValues = extractEventParametersWithLog(REGISTERFULL_EVENT, log);
+                RegisterFullEventResponse typedResponse = new RegisterFullEventResponse();
+                typedResponse.log = log;
+                typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+                return typedResponse;
+            }
+        });
+    }
+
+    public Flowable<RegisterFullEventResponse> registerFullEventFlowable(DefaultBlockParameter startBlock, DefaultBlockParameter endBlock) {
+        EthFilter filter = new EthFilter(startBlock, endBlock, getContractAddress());
+        filter.addSingleTopic(EventEncoder.encode(REGISTERFULL_EVENT));
+        return registerFullEventFlowable(filter);
+    }
+
+    public List<RegisteredForEventResponse> getRegisteredForEvents(TransactionReceipt transactionReceipt) {
+        List<Contract.EventValuesWithLog> valueList = extractEventParametersWithLog(REGISTEREDFOR_EVENT, transactionReceipt);
+        ArrayList<RegisteredForEventResponse> responses = new ArrayList<RegisteredForEventResponse>(valueList.size());
+        for (Contract.EventValuesWithLog eventValues : valueList) {
+            RegisteredForEventResponse typedResponse = new RegisteredForEventResponse();
+            typedResponse.log = eventValues.getLog();
+            typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+            responses.add(typedResponse);
+        }
+        return responses;
+    }
+
+    public Flowable<RegisteredForEventResponse> registeredForEventFlowable(EthFilter filter) {
+        return web3j.ethLogFlowable(filter).map(new Function<Log, RegisteredForEventResponse>() {
+            @Override
+            public RegisteredForEventResponse apply(Log log) {
+                Contract.EventValuesWithLog eventValues = extractEventParametersWithLog(REGISTEREDFOR_EVENT, log);
+                RegisteredForEventResponse typedResponse = new RegisteredForEventResponse();
+                typedResponse.log = log;
+                typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+                return typedResponse;
+            }
+        });
+    }
+
+    public Flowable<RegisteredForEventResponse> registeredForEventFlowable(DefaultBlockParameter startBlock, DefaultBlockParameter endBlock) {
+        EthFilter filter = new EthFilter(startBlock, endBlock, getContractAddress());
+        filter.addSingleTopic(EventEncoder.encode(REGISTEREDFOR_EVENT));
+        return registeredForEventFlowable(filter);
+    }
+
+    public List<TEventResponse> getTEvents(TransactionReceipt transactionReceipt) {
+        List<Contract.EventValuesWithLog> valueList = extractEventParametersWithLog(T_EVENT, transactionReceipt);
+        ArrayList<TEventResponse> responses = new ArrayList<TEventResponse>(valueList.size());
+        for (Contract.EventValuesWithLog eventValues : valueList) {
+            TEventResponse typedResponse = new TEventResponse();
+            typedResponse.log = eventValues.getLog();
+            typedResponse.p = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+            responses.add(typedResponse);
+        }
+        return responses;
+    }
+
+    public Flowable<TEventResponse> tEventFlowable(EthFilter filter) {
+        return web3j.ethLogFlowable(filter).map(new Function<Log, TEventResponse>() {
+            @Override
+            public TEventResponse apply(Log log) {
+                Contract.EventValuesWithLog eventValues = extractEventParametersWithLog(T_EVENT, log);
+                TEventResponse typedResponse = new TEventResponse();
+                typedResponse.log = log;
+                typedResponse.p = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+                return typedResponse;
+            }
+        });
+    }
+
+    public Flowable<TEventResponse> tEventFlowable(DefaultBlockParameter startBlock, DefaultBlockParameter endBlock) {
+        EthFilter filter = new EthFilter(startBlock, endBlock, getContractAddress());
+        filter.addSingleTopic(EventEncoder.encode(T_EVENT));
+        return tEventFlowable(filter);
+    }
+
+    public List<TaskResultEventResponse> getTaskResultEvents(TransactionReceipt transactionReceipt) {
+        List<Contract.EventValuesWithLog> valueList = extractEventParametersWithLog(TASKRESULT_EVENT, transactionReceipt);
+        ArrayList<TaskResultEventResponse> responses = new ArrayList<TaskResultEventResponse>(valueList.size());
+        for (Contract.EventValuesWithLog eventValues : valueList) {
+            TaskResultEventResponse typedResponse = new TaskResultEventResponse();
+            typedResponse.log = eventValues.getLog();
+            typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+            typedResponse.results = (BigInteger) eventValues.getNonIndexedValues().get(1).getValue();
+            responses.add(typedResponse);
+        }
+        return responses;
+    }
+
+    public Flowable<TaskResultEventResponse> taskResultEventFlowable(EthFilter filter) {
+        return web3j.ethLogFlowable(filter).map(new Function<Log, TaskResultEventResponse>() {
+            @Override
+            public TaskResultEventResponse apply(Log log) {
+                Contract.EventValuesWithLog eventValues = extractEventParametersWithLog(TASKRESULT_EVENT, log);
+                TaskResultEventResponse typedResponse = new TaskResultEventResponse();
+                typedResponse.log = log;
+                typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+                typedResponse.results = (BigInteger) eventValues.getNonIndexedValues().get(1).getValue();
+                return typedResponse;
+            }
+        });
+    }
+
+    public Flowable<TaskResultEventResponse> taskResultEventFlowable(DefaultBlockParameter startBlock, DefaultBlockParameter endBlock) {
+        EthFilter filter = new EthFilter(startBlock, endBlock, getContractAddress());
+        filter.addSingleTopic(EventEncoder.encode(TASKRESULT_EVENT));
+        return taskResultEventFlowable(filter);
+    }
+
+    public List<VerifiedResultEventResponse> getVerifiedResultEvents(TransactionReceipt transactionReceipt) {
+        List<Contract.EventValuesWithLog> valueList = extractEventParametersWithLog(VERIFIEDRESULT_EVENT, transactionReceipt);
+        ArrayList<VerifiedResultEventResponse> responses = new ArrayList<VerifiedResultEventResponse>(valueList.size());
+        for (Contract.EventValuesWithLog eventValues : valueList) {
+            VerifiedResultEventResponse typedResponse = new VerifiedResultEventResponse();
+            typedResponse.log = eventValues.getLog();
+            typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+            responses.add(typedResponse);
+        }
+        return responses;
+    }
+
+    public Flowable<VerifiedResultEventResponse> verifiedResultEventFlowable(EthFilter filter) {
+        return web3j.ethLogFlowable(filter).map(new Function<Log, VerifiedResultEventResponse>() {
+            @Override
+            public VerifiedResultEventResponse apply(Log log) {
+                Contract.EventValuesWithLog eventValues = extractEventParametersWithLog(VERIFIEDRESULT_EVENT, log);
+                VerifiedResultEventResponse typedResponse = new VerifiedResultEventResponse();
+                typedResponse.log = log;
+                typedResponse.tid = (BigInteger) eventValues.getNonIndexedValues().get(0).getValue();
+                return typedResponse;
+            }
+        });
+    }
+
+    public Flowable<VerifiedResultEventResponse> verifiedResultEventFlowable(DefaultBlockParameter startBlock, DefaultBlockParameter endBlock) {
+        EthFilter filter = new EthFilter(startBlock, endBlock, getContractAddress());
+        filter.addSingleTopic(EventEncoder.encode(VERIFIEDRESULT_EVENT));
+        return verifiedResultEventFlowable(filter);
+    }
+
+    public RemoteFunctionCall<BigInteger> getContractBalance() {
+        final org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(FUNC_GETCONTRACTBALANCE, 
+                Arrays.<Type>asList(), 
+                Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
+        return executeRemoteCallSingleValueReturn(function, BigInteger.class);
+    }
+
+    public RemoteFunctionCall<String> getOwner() {
+        final org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(FUNC_GETOWNER, 
+                Arrays.<Type>asList(), 
+                Arrays.<TypeReference<?>>asList(new TypeReference<Address>() {}));
+        return executeRemoteCallSingleValueReturn(function, String.class);
+    }
+
+    public RemoteFunctionCall<BigInteger> getTotalParticipantsCount() {
+        final org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(FUNC_GETTOTALPARTICIPANTSCOUNT, 
+                Arrays.<Type>asList(), 
+                Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
+        return executeRemoteCallSingleValueReturn(function, BigInteger.class);
+    }
+
+    public RemoteFunctionCall<TransactionReceipt> initializeContext(BigInteger _taskId, BigInteger _min_deposit, BigInteger weiValue) {
         final org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(
-                FUNC_REGISTER, 
-                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(_amount)), 
+                FUNC_INITIALIZECONTEXT, 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(_taskId), 
+                new org.web3j.abi.datatypes.generated.Uint256(_min_deposit)), 
                 Collections.<TypeReference<?>>emptyList());
         return executeRemoteCallTransaction(function, weiValue);
     }
 
-    public RemoteFunctionCall<BigInteger> getBalance() {
-        final org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(FUNC_GETBALANCE, 
-                Arrays.<Type>asList(), 
-                Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
-        return executeRemoteCallSingleValueReturn(function, BigInteger.class);
-    }
-
-    public RemoteFunctionCall<BigInteger> participantAmounts(String param0) {
-        final org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(FUNC_PARTICIPANTAMOUNTS, 
-                Arrays.<Type>asList(new org.web3j.abi.datatypes.Address(160, param0)), 
-                Arrays.<TypeReference<?>>asList(new TypeReference<Uint256>() {}));
-        return executeRemoteCallSingleValueReturn(function, BigInteger.class);
-    }
-
-    public RemoteFunctionCall<TransactionReceipt> pay() {
+    public RemoteFunctionCall<TransactionReceipt> payExecutors(BigInteger weiValue) {
         final org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(
-                FUNC_PAY, 
+                FUNC_PAYEXECUTORS, 
                 Arrays.<Type>asList(), 
                 Collections.<TypeReference<?>>emptyList());
-        return executeRemoteCallTransaction(function);
+        return executeRemoteCallTransaction(function, weiValue);
     }
 
-    public RemoteFunctionCall<TransactionReceipt> receiveResults(BigInteger result, BigInteger merkleHashRoot, BigInteger tapeLength) {
+    public RemoteFunctionCall<TransactionReceipt> registerExecutor(BigInteger taskId, BigInteger weiValue) {
         final org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(
-                FUNC_RECEIVERESULTS, 
-                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(result), 
-                new org.web3j.abi.datatypes.generated.Uint256(merkleHashRoot), 
-                new org.web3j.abi.datatypes.generated.Uint256(tapeLength)), 
+                FUNC_REGISTEREXECUTOR, 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(taskId)), 
                 Collections.<TypeReference<?>>emptyList());
-        return executeRemoteCallTransaction(function);
+        return executeRemoteCallTransaction(function, weiValue);
+    }
+
+    public RemoteFunctionCall<TransactionReceipt> submitResults(BigInteger taskId, BigInteger resultHash, BigInteger weiValue) {
+        final org.web3j.abi.datatypes.Function function = new org.web3j.abi.datatypes.Function(
+                FUNC_SUBMITRESULTS, 
+                Arrays.<Type>asList(new org.web3j.abi.datatypes.generated.Uint256(taskId), 
+                new org.web3j.abi.datatypes.generated.Uint256(resultHash)), 
+                Collections.<TypeReference<?>>emptyList());
+        return executeRemoteCallTransaction(function, weiValue);
     }
 
     @Deprecated
@@ -234,12 +448,12 @@ public class CRR extends Contract {
         return deployRemoteCall(CRR.class, web3j, transactionManager, gasPrice, gasLimit, BINARY, "");
     }
 
+    public static class BadResultEventResponse extends BaseEventResponse {
+        public BigInteger tid;
+    }
+
     public static class NewTaskEventResponse extends BaseEventResponse {
-        public BigInteger _task_url;
-
-        public BigInteger _web_hash;
-
-        public BigInteger _comp_hash;
+        public BigInteger tid;
 
         public BigInteger _reward;
 
@@ -247,6 +461,28 @@ public class CRR extends Contract {
     }
 
     public static class RegisterCompletedEventResponse extends BaseEventResponse {
-        public BigInteger _state;
+        public BigInteger tid;
+    }
+
+    public static class RegisterFullEventResponse extends BaseEventResponse {
+        public BigInteger tid;
+    }
+
+    public static class RegisteredForEventResponse extends BaseEventResponse {
+        public BigInteger tid;
+    }
+
+    public static class TEventResponse extends BaseEventResponse {
+        public BigInteger p;
+    }
+
+    public static class TaskResultEventResponse extends BaseEventResponse {
+        public BigInteger tid;
+
+        public BigInteger results;
+    }
+
+    public static class VerifiedResultEventResponse extends BaseEventResponse {
+        public BigInteger tid;
     }
 }
