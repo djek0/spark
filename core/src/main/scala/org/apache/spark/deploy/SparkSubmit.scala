@@ -83,13 +83,12 @@ private[spark] class SparkSubmit extends Logging {
 
     val testThread = new Thread{
       override def run {
-        for( i <- range(10)) {
-          println("[THREAD] in the thread!")
+        for( i <- 1 to 10) {
+          println("[THREAD] in the thread!");
+          Thread.sleep(200);
         }
       }
-      Thread.sleep(200)
     }
-
     testThread.start()
 
     logInfo(s"[EXTRA LOG] in SparkSubmit artifact, doSubmit function!")

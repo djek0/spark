@@ -17,18 +17,12 @@
 
 package org.apache.spark.deploy.worker
 
-import java.io.{File, IOException}
-import java.text.SimpleDateFormat
-import java.util.{Date, Locale, UUID}
-import java.util.concurrent._
-import java.util.concurrent.{Future => JFuture, ScheduledFuture => JScheduledFuture}
-import java.util.function.Supplier
+import contract.localGanaceDeploy
 
 import scala.collection.mutable.{HashMap, HashSet, LinkedHashMap}
 import scala.concurrent.ExecutionContext
 import scala.util.Random
 import scala.util.control.NonFatal
-
 import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.deploy.{Command, ExecutorDescription, ExecutorState}
 import org.apache.spark.deploy.DeployMessages._
@@ -36,7 +30,7 @@ import org.apache.spark.deploy.ExternalShuffleService
 import org.apache.spark.deploy.StandaloneResourceUtils._
 import org.apache.spark.deploy.master.{DriverState, Master}
 import org.apache.spark.deploy.worker.ui.WorkerWebUI
-import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.{Logging, config}
 import org.apache.spark.internal.config.Tests.IS_TESTING
 import org.apache.spark.internal.config.UI._
 import org.apache.spark.internal.config.Worker._
@@ -45,6 +39,7 @@ import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
 import org.apache.spark.util.{SignalUtils, SparkUncaughtExceptionHandler, ThreadUtils, Utils}
+import contract.localGanaceDeploy
 
 private[deploy] class Worker(
     override val rpcEnv: RpcEnv,
@@ -185,7 +180,7 @@ private[deploy] class Worker(
   var coresUsed = 0
   var memoryUsed = 0
   val resourcesUsed = new HashMap[String, MutableResourceInfo]()
-
+  var contractInstance = _
   def coresFree: Int = cores - coresUsed
   def memoryFree: Int = memory - memoryUsed
 
@@ -202,6 +197,12 @@ private[deploy] class Worker(
       host, port, cores, Utils.megabytesToString(memory)))
     logInfo(s"Running Spark version ${org.apache.spark.SPARK_VERSION}")
     logInfo("Spark home: " + sparkHome)
+    try{
+      contractInstance.loadDeployedContract();
+      logInfo("[MASTER] Successfully loaded deployed Contract ")
+    } catch {
+      case _ : Throwable => logError("Loading the contract failed :( ")
+    }
     createWorkDir()
     startExternalShuffleService()
     setupWorkerResources()
@@ -883,4 +884,15 @@ private[deploy] object Worker extends Logging {
       cmd
     }
   }
+}
+
+object localGanaceDeploy{
+  val accountNumber = "0xb7f9BF4cD9C16EB730e399d1Fa96AD193C6B4214";
+  val privateKey = "b8167ff73508f23e71fb688858fa4df8ef9662ef7ba96d57cf17e2386c3c92e0";
+  val contractAddress = "0xf8DA1328a6261a5175337C6fFc182f4eb0e983F3";
+  val conInst=  new localGanaceDeploy(accountNumber, contractAddress, privateKey);
+  def instance() : localGanaceDeploy = {
+    conInst
+  }
+
 }

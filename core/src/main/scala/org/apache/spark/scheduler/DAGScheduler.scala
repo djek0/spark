@@ -42,8 +42,7 @@ import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.storage._
 import org.apache.spark.storage.BlockManagerMessages.BlockManagerHeartbeat
 import org.apache.spark.util._
-
-import org.apache.spark.contract
+import org.apache.spark.deploy.master.localGanaceDeploy
 
 /**
  * The high-level scheduling layer that implements stage-oriented scheduling. It computes a DAG of

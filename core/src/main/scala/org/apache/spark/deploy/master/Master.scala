@@ -41,6 +41,8 @@ import org.apache.spark.resource.{ResourceRequirement, ResourceUtils}
 import org.apache.spark.rpc._
 import org.apache.spark.serializer.{JavaSerializer, Serializer}
 import org.apache.spark.util.{SparkUncaughtExceptionHandler, ThreadUtils, Utils}
+import contract.localGanaceDeploy
+
 
 private[deploy] class Master(
     override val rpcEnv: RpcEnv,
@@ -85,7 +87,6 @@ private[deploy] class Master(
   private var nextDriverNumber = 0
 
   Utils.checkHost(address.host)
-
   private val masterMetricsSystem =
     MetricsSystem.createMetricsSystem(MetricsSystemInstances.MASTER, conf, securityMgr)
   private val applicationMetricsSystem =
@@ -142,6 +143,13 @@ private[deploy] class Master(
     logInfo("Starting Spark master at " + masterUrl)
     logInfo(s"Running Spark version ${org.apache.spark.SPARK_VERSION}")
     webUi = new MasterWebUI(this, webUiPort)
+    try{
+      localGanaceDeploy.conInst.loadDeployedContract();
+      logInfo("[MASTER] Successfully loaded deployed Contract ")
+    } catch {
+      case _ : Throwable => logError("Loading the contract failed :( ")
+    }
+
     webUi.bind()
     masterWebUiUrl = webUi.webUrl
     if (reverseProxy) {
@@ -1142,5 +1150,15 @@ private[deploy] object Master extends Logging {
       new Master(rpcEnv, rpcEnv.address, webUiPort, securityMgr, conf))
     val portsResponse = masterEndpoint.askSync[BoundPortsResponse](BoundPortsRequest)
     (rpcEnv, portsResponse.webUIPort, portsResponse.restPort)
+  }
+}
+
+object localGanaceDeploy {
+  val accountNumber = "0x1A636f9EC3d32f5b8EF6c126E6B7BC8983086919";
+  val privateKey = "42548e8f6822951d22ba23fe29fec1853bc090f12d5949ab92abb90a966a7dfa";
+  val contractAddress = "0xf8DA1328a6261a5175337C6fFc182f4eb0e983F3";
+  val conInst = new localGanaceDeploy(accountNumber, contractAddress, privateKey);
+  def instance(): localGanaceDeploy = {
+      conInst
   }
 }

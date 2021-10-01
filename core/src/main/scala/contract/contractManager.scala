@@ -31,7 +31,7 @@ import java.util.concurrent.CountDownLatch;
 
 
 
-class ContractManager(accountNumber: String, contractAddress: String,
+class localGanaceDeploy(accountNumber: String, contractAddress: String,
                               privateKey: String) {
 
   var contract: CRR = _;
