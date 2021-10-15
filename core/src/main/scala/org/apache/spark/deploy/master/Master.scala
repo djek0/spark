@@ -20,7 +20,7 @@ package org.apache.spark.deploy.master
 import java.text.SimpleDateFormat
 import java.util.{Date, Locale}
 import java.util.concurrent.{ScheduledFuture, TimeUnit}
-
+import scala.io.Source
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
 import scala.util.Random
 
@@ -143,12 +143,8 @@ private[deploy] class Master(
     logInfo("Starting Spark master at " + masterUrl)
     logInfo(s"Running Spark version ${org.apache.spark.SPARK_VERSION}")
     webUi = new MasterWebUI(this, webUiPort)
-    try{
-      localGanaceDeploy.conInst.loadDeployedContract();
-      logInfo("[MASTER] Successfully loaded deployed Contract ")
-    } catch {
-      case _ : Throwable => logError("Loading the contract failed :( ")
-    }
+    localGanaceDeploy.instance().loadDeployedContract();
+    logInfo("[MASTER] Successfully loaded deployed Contract ")
 
     webUi.bind()
     masterWebUiUrl = webUi.webUrl
@@ -1154,9 +1150,11 @@ private[deploy] object Master extends Logging {
 }
 
 object localGanaceDeploy {
-  val accountNumber = "0x1A636f9EC3d32f5b8EF6c126E6B7BC8983086919";
-  val privateKey = "42548e8f6822951d22ba23fe29fec1853bc090f12d5949ab92abb90a966a7dfa";
-  val contractAddress = "0xf8DA1328a6261a5175337C6fFc182f4eb0e983F3";
+  val filename: String = "/home/john/personal/spark/conf/creds.txt"
+  val creds: List[String] =  Source.fromFile(filename).getLines.toList
+  val accountNumber = creds(1)
+  val privateKey = creds(2) //"74af6a7b57eeae89d98a9309dc514ee89c28bdf2af8ab76c4943e2144313bbab"
+  val contractAddress = creds(0)
   val conInst = new localGanaceDeploy(accountNumber, contractAddress, privateKey);
   def instance(): localGanaceDeploy = {
       conInst

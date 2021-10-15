@@ -30,7 +30,6 @@ import java.math.BigInteger;
 import java.util.concurrent.CountDownLatch;
 
 
-
 class localGanaceDeploy(accountNumber: String, contractAddress: String,
                               privateKey: String) {
 
@@ -68,6 +67,22 @@ class localGanaceDeploy(accountNumber: String, contractAddress: String,
     return res
   }
 
+  def registerExecutor(taskId: Int, weiValue: Int): Any = {
+    val taskIdBig = new BigInteger(taskId.toString);
+    val weiValueBig = new BigInteger(weiValue.toString);
+    val transaction = this.contract.registerExecutor(taskIdBig, weiValueBig);
+    transaction.send();
+  }
+
+  def submitResults(taskId: Int, resultHash: String, weiValue: Int): Any ={
+    val taskIdBig = new BigInteger(taskId.toString);
+    val resHashBig = new BigInteger(resultHash.toString).abs();
+    val weiValueBig = new BigInteger(weiValue.toString);
+    println(s"[SUBMIT] resd ${resHashBig} for task ${taskIdBig}")
+    val transaction = this.contract.submitResults(taskIdBig, resHashBig ,weiValueBig);
+    transaction.send();
+  }
+
   def pollForNewTaskEvents(): Any ={
     val filter: EthFilter = new EthFilter(DefaultBlockParameterName.EARLIEST,
         DefaultBlockParameterName.LATEST, this.contractAddress.substring(2));
@@ -76,3 +91,10 @@ class localGanaceDeploy(accountNumber: String, contractAddress: String,
   }
 
 }
+
+/*
+object localGanaceDeploy{
+  def apply(accountNumber: String, contractAddress: String, privateKey: String): localGanaceDeploy = {
+    new localGanaceDeploy(accountNumber, contractAddress, privateKey)
+  }
+}*/

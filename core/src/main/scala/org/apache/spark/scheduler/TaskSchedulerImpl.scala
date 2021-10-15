@@ -218,15 +218,19 @@ private[spark] class TaskSchedulerImpl(
     logInfo("Adding task set " + taskSet.id + " with " + tasks.length + " tasks")
     logInfo(s"[EXTRA LOG][submitTasks] taskSet ${taskSet.id} with ${tasks.length} tasks")
     logInfo(s"[EXTRA LOG][submitTasks] calling initialize context!")
+    val stageId = taskSet.stageId
+    val job = taskSet.toString
     this.synchronized {
       val manager = createTaskSetManager(taskSet, maxTaskFailures)
       val stage = taskSet.stageId
-      val stageTaskSets =
+     // val job = taskSet.priority //according to the call in dagSceduler.
+     val stageTaskSets =
         taskSetsByStageIdAndAttempt.getOrElseUpdate(stage, new HashMap[Int, TaskSetManager])
-      var ids = (0 to tasks.length).filter(x => x%2 == 0)
-      for (id <- ids){
-        localGanaceDeploy.conInst.initializeContext(id, 12345, 123456)
-      }
+      var ids= (0 to tasks.length).filter(x => x%2 == 0)
+      logInfo(s"all ids: $ids")
+      localGanaceDeploy.conInst.loadDeployedContract();
+      ids.foreach(id => localGanaceDeploy.instance().initializeContext(id, 12345, 123456));;
+
       // Mark all the existing TaskSetManagers of this stage as zombie, as we are adding a new one.
       // This is necessary to handle a corner case. Let's say a stage has 10 partitions and has 2
       // TaskSetManagers: TSM1(zombie) and TSM2(active). TSM1 has a running task for partition 10

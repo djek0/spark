@@ -17,8 +17,13 @@
 
 package org.apache.spark.deploy.worker
 
-import contract.localGanaceDeploy
-
+import java.io.{File, IOException}
+import java.text.SimpleDateFormat
+import java.util.{Date, Locale, UUID}
+import java.util.concurrent._
+import java.util.concurrent.{Future => JFuture, ScheduledFuture => JScheduledFuture}
+import java.util.function.Supplier
+import scala.io.Source
 import scala.collection.mutable.{HashMap, HashSet, LinkedHashMap}
 import scala.concurrent.ExecutionContext
 import scala.util.Random
@@ -180,7 +185,6 @@ private[deploy] class Worker(
   var coresUsed = 0
   var memoryUsed = 0
   val resourcesUsed = new HashMap[String, MutableResourceInfo]()
-  var contractInstance = _
   def coresFree: Int = cores - coresUsed
   def memoryFree: Int = memory - memoryUsed
 
@@ -197,12 +201,14 @@ private[deploy] class Worker(
       host, port, cores, Utils.megabytesToString(memory)))
     logInfo(s"Running Spark version ${org.apache.spark.SPARK_VERSION}")
     logInfo("Spark home: " + sparkHome)
-    try{
-      contractInstance.loadDeployedContract();
-      logInfo("[MASTER] Successfully loaded deployed Contract ")
-    } catch {
-      case _ : Throwable => logError("Loading the contract failed :( ")
-    }
+
+      //val accountNumber = sys.env.get("WORKER_ACCOUNT").getOrElse("0xA234b02394428E0D2db242341eab5aF855E4c375");
+      //val privateKey = sys.env.get("WORKER_KEY").getOrElse("37ace8a8efac886a3a6c21a9f2d8b2dc99d73b694f94348e14a97026225cd431");
+      //val contractAddress = sys.env.get("DEPLOY_ADDRESS").getOrElse("0xB39212F3Ec763f9B24d801b3d8E7BF23a3bcFD7d");
+      //val conInst=  new localGanaceDeploy(accountNumber, contractAddress, privateKey);
+      //conInst.loadDeployedContract();
+      //logInfo("[WORKER] Successfully loaded deployed Contract ")
+
     createWorkDir()
     startExternalShuffleService()
     setupWorkerResources()
@@ -886,13 +892,14 @@ private[deploy] object Worker extends Logging {
   }
 }
 
-object localGanaceDeploy{
-  val accountNumber = "0xb7f9BF4cD9C16EB730e399d1Fa96AD193C6B4214";
-  val privateKey = "b8167ff73508f23e71fb688858fa4df8ef9662ef7ba96d57cf17e2386c3c92e0";
-  val contractAddress = "0xf8DA1328a6261a5175337C6fFc182f4eb0e983F3";
-  val conInst=  new localGanaceDeploy(accountNumber, contractAddress, privateKey);
-  def instance() : localGanaceDeploy = {
+object localContractWorker{
+  val filename: String = "/home/john/personal/spark/conf/creds.txt"
+  val creds: List[String] =  Source.fromFile(filename).getLines.toList
+  val accountNumber = creds(3)
+  val privateKey = creds(4)
+  val contractAddress = creds(0)
+  val conInst = new localGanaceDeploy(accountNumber, contractAddress, privateKey);
+  def instance(): localGanaceDeploy = {
     conInst
   }
-
 }

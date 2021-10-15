@@ -27,6 +27,8 @@ import java.util._
 import java.util.Properties
 import java.util.concurrent._
 import java.util.concurrent.atomic.AtomicBoolean
+import java.math.BigInteger;
+
 import javax.annotation.concurrent.GuardedBy
 
 import scala.collection.JavaConverters._
@@ -51,7 +53,7 @@ import org.apache.spark.shuffle.FetchFailedException
 import org.apache.spark.storage.{StorageLevel, TaskResultBlockId}
 import org.apache.spark.util._
 import org.apache.spark.util.io.ChunkedByteBuffer
-
+import org.apache.spark.deploy.worker.localContractWorker
 /**
  * Spark executor, backed by a threadpool to run tasks.
  *
@@ -83,6 +85,8 @@ private[spark] class Executor(
   private val EMPTY_BYTE_BUFFER = ByteBuffer.wrap(new Array[Byte](0))
 
   private val conf = env.conf
+
+  localContractWorker.instance().loadDeployedContract()
 
   // No ip or host:port - just hostname
   Utils.checkHost(executorHostname)
@@ -243,7 +247,11 @@ private[spark] class Executor(
   def launchTask(context: ExecutorBackend, taskDescription: TaskDescription): Unit = {
     val tr = new TaskRunner(context, taskDescription)
     logInfo(s"[EXTRA LOG][EXECUTOR.scala/launchTask] called launchTask function for task ${taskDescription.taskId}")
-    runningTasks.put(taskDescription.taskId, tr)
+    val taskId = taskDescription.taskId.toInt;
+    logInfo(s"[EXTRA LOG][EXECUTOR] calling localCOntractWorker.registerWorker with args ${taskId/2}")
+    localContractWorker.instance().registerExecutor(taskId/2 , 123456);
+    logInfo(s"[EXTRA LOG] registered worker for task $taskId");
+  runningTasks.put(taskDescription.taskId, tr)
     threadPool.execute(tr)
   }
 
@@ -510,8 +518,14 @@ private[spark] class Executor(
 
         val resultSer = env.serializer.newInstance()
         val beforeSerializationNs = System.nanoTime()
-        val valueBytes = resultSer.serialize(value)
-        
+        val honestFlag = sys.env.get("HONEST_WORKER").getOrElse(
+          "TRUE"
+        );
+        var valueBytes = resultSer.serialize(value)
+        if(honestFlag != "TRUE" && taskId == 7) {
+          valueBytes = resultSer.serialize("123")
+        }
+
         val afterSerializationNs = System.nanoTime()
 
         // Deserialization happens in two parts: first, we deserialize a Task object, which
@@ -596,16 +610,34 @@ private[spark] class Executor(
             ser.serialize(new IndirectTaskResult[Any](blockId, resultSize))
           } else {
             logInfo(s"Finished $taskName (TID $taskId). $resultSize bytes result sent to driver")
-            //logInfo(s"[EXTRA LOG][in task run] direct result hash (for TID ${taskId}) serialised: [${serializedDirectResult.hashCode()}]")
             serializedDirectResult
           }
         }
+
         logInfo(s"[EXTRA LOG][in task run] result hash (for TID ${taskId}) serialised:" +
                 s"[${Arrays.toString(valueBytes.array()).hashCode()}]")
-        //logInfo(s"[EXTRA LOG][in task run] first element of buffer for TID ${taskId} is [${valueBytes.arrayOffset()}]")
-        //logInfo(s"value bytes: ${valueBytes}")
+
+        var resultHash: String = Arrays.toString(valueBytes.array()).hashCode().toString;
+
+        try{
+          localContractWorker.instance().submitResults(taskId.toInt/2, resultHash, 123456);
+          print(s"[EXECUTOR SUBMIT RESULTS] call OK! for task ${taskId}")
+        } catch {
+          case e: java.lang.UnsupportedOperationException => {
+            logError(e.toString);``
+            println(s"[EXECUTOR SUBMIT RESULTS] call failed (UnsupportedOperationException)")
+          }
+          case e: java.lang.RuntimeException => {
+            logError(e.toString);
+            println(s"[EXECUTOR SUBMIT RESULTS] call failed (RuntimeException)");
+          }
+          case _: Throwable => println("Some unknown error occured");
+        } finally {
+          println(s"[EXECUTOR SUBMIT RESULTS] called for task: ${taskId.toInt}, hash: ${resultHash}")
+        }
+
         executorSource.SUCCEEDED_TASKS.inc(1L)
-        setTaskFinishedAndClearInterruptStatus()        
+        setTaskFinishedAndClearInterruptStatus()
         execBackend.statusUpdate(taskId, TaskState.FINISHED, serializedResult)
       } catch {
         case t: TaskKilledException =>
