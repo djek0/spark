@@ -70,6 +70,12 @@ private[spark] class TaskSetManager(
   val env = SparkEnv.get
   val ser = env.closureSerializer.newInstance()
 
+  /**
+   * Added by john
+   */
+  val taskIndexToHost = new HashMap[Long, String]
+
+
   val tasks = taskSet.tasks
   private[scheduler] val partitionToIndex = tasks.zipWithIndex
     .map { case (t, idx) => t.partitionId -> idx }.toMap
@@ -121,6 +127,22 @@ private[spark] class TaskSetManager(
   private[scheduler] val taskSetBlacklistHelperOpt: Option[TaskSetBlacklist] = {
     blacklistTracker.map { _ =>
       new TaskSetBlacklist(sched.sc.listenerBus, conf, stageId, taskSet.stageAttemptId, clock)
+    }
+  }
+
+  /**
+   * added by john
+   * @param index: Long, index of current task
+   * @param host: String, hostaname || ip
+   * @return Boolean
+   */
+  private[scheduler] def isRelativeOnSameNode(index: Long, host: String): Boolean = {
+    if ((index % 2 == 0 && taskIndexToHost.contains(index+1) && taskIndexToHost(index+1) == host) ||
+      (index % 2 == 1 && taskIndexToHost.contains(index-1) && taskIndexToHost(index-1)== host)) {
+      true
+    }
+    else{
+      false
     }
   }
 
@@ -282,7 +304,8 @@ private[spark] class TaskSetManager(
       indexOffset -= 1
       val index = list(indexOffset)
       if (!isTaskBlacklistedOnExecOrNode(index, execId, host) &&
-          !(speculative && hasAttemptOnHost(index, host))) {
+          !(speculative && hasAttemptOnHost(index, host)) &&
+          !isRelativeOnSameNode(index, host)) {
         // This should almost always be list.trimEnd(1) to remove tail
         list.remove(indexOffset)
         // Speculatable task should only be launched when at most one copy of the
@@ -418,6 +441,7 @@ private[spark] class TaskSetManager(
         // Found a task; do some bookkeeping and return a task description
         val task = tasks(index)
         val taskId = sched.newTaskId()
+        taskIndexToHost(index) = host
         // Do various bookkeeping
         copiesRunning(index) += 1
         val attemptNum = taskAttempts(index).size
@@ -471,6 +495,7 @@ private[spark] class TaskSetManager(
         }.toMap
 
         sched.dagScheduler.taskStarted(task, info)
+        println(s"[TASK SET MANAGER] tid $taskId for task-index $index")
         new TaskDescription(
           taskId,
           attemptNum,

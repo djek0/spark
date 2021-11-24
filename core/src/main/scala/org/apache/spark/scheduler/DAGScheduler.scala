@@ -42,7 +42,7 @@ import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.storage._
 import org.apache.spark.storage.BlockManagerMessages.BlockManagerHeartbeat
 import org.apache.spark.util._
-import org.apache.spark.deploy.master.localGanaceDeploy
+//import org.apache.spark.deploy.master.localGanaceDeploy
 
 /**
  * The high-level scheduling layer that implements stage-oriented scheduling. It computes a DAG of
@@ -226,6 +226,23 @@ private[spark] class DAGScheduler(
    * Number of max concurrent tasks check failures for each barrier job.
    */
   private[scheduler] val barrierJobIdToNumTasksCheckFailures = new ConcurrentHashMap[Int, Int]
+
+  /**
+   * EXTRA DOCS BY JOHN
+   */
+
+
+  /**
+   * resultsMap stores results for all tasks so comparison
+   */
+  //stage -> task -> result
+  private[scheduler] var resultsMap = new HashMap[Int, HashMap[Int, List[String]]]()
+
+  /**
+   * We are using this hashmap to store taskCompletionEvents and post them
+   *  only after all related atsks have been submitted.
+   */
+  var unpostedTaskEndEvent = new HashMap[Int, HashMap[Int, CompletionEvent]]
 
   /**
    * Time in seconds to wait between a max concurrent tasks check failure and the next check.
@@ -718,7 +735,7 @@ private[spark] class DAGScheduler(
     }
 
     val jobId = nextJobId.getAndIncrement()
-    logInfo(s"[EXTRA LOG][In submit job] for job with id = ${jobId}")
+    //logInfo(s"[EXTRA LOG][In submit job] for job with id = ${jobId}")
     if (partitions.isEmpty) {
       val clonedProperties = Utils.cloneProperties(properties)
       if (sc.getLocalProperty(SparkContext.SPARK_JOB_DESCRIPTION) == null) {
@@ -1134,7 +1151,7 @@ private[spark] class DAGScheduler(
   /** Called when stage's parents are available and we can now do its task. */
   private def submitMissingTasks(stage: Stage, jobId: Int): Unit = {
     logDebug("submitMissingTasks(" + stage + ")")
-    logInfo(s"[EXTRA LOG][submitMissingTasks/1136] submitting missing tasks.")
+    //logInfo(s"[EXTRA LOG][submitMissingTasks/1136] submitting missing tasks.")
     // Before find missing partition, do the intermediate state clean work first.
     // The operation here can make sure for the partially completed intermediate stage,
     // `findMissingPartitions()` returns all partitions every time.
@@ -1249,7 +1266,7 @@ private[spark] class DAGScheduler(
             val locs = taskIdToLocations(id)
             val part = partitions(id)
             logInfo(s"[EXTRA LOG] prefered locations: ${locs}")
-            logInfo(s"[EXTRA LOG] creating new ShuffleMapTask")
+            //logInfo(s"[EXTRA LOG] creating new ShuffleMapTask")
             stage.pendingPartitions += id
             Seq[Task[_]](
               new ShuffleMapTask(stage.id, stage.latestInfo.attemptNumber,
@@ -1267,7 +1284,7 @@ private[spark] class DAGScheduler(
             val part = partitions(p)
             val locs = taskIdToLocations(id)
             logInfo(s"[EXTRA LOG] prefered locations: ${locs}")
-            logInfo(s"[EXTRA LOG] creating new ResultTask")
+            //logInfo(s"[EXTRA LOG] creating new ResultTask")
             Seq[Task[_]](   
               new ResultTask(stage.id, stage.latestInfo.attemptNumber,
                 taskBinary, part, locs, id, properties, serializedTaskMetrics,
@@ -1291,7 +1308,7 @@ private[spark] class DAGScheduler(
     if (tasks.nonEmpty) {
       logInfo(s"Submitting ${tasks.size} missing tasks from $stage (${stage.rdd}) (first 15 " +
         s"tasks are for partitions ${tasks.take(15).map(_.partitionId)})")
-      logInfo(s"[EXTRA LOG] Submitting Tasks to taskScheduler. (line ~1279)")
+     // logInfo(s"[EXTRA LOG] Submitting Tasks to taskScheduler. (line ~1279)")
       
       taskScheduler.submitTasks(new TaskSet(
         tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties))
@@ -1410,6 +1427,8 @@ private[spark] class DAGScheduler(
   private[scheduler] def handleTaskCompletion(event: CompletionEvent): Unit = {
     val task = event.task
     val stageId = task.stageId
+    val taskIndex = event.taskInfo.index
+    //logInfo(s"[EXTRA LOG] in handleTaskCompletion (TID = ${event.taskInfo.taskId}) with result ${event.result}")
 
     outputCommitCoordinator.taskCompleted(
       stageId,
@@ -1431,6 +1450,37 @@ private[spark] class DAGScheduler(
     }
 
     val stage = stageIdToStage(task.stageId)
+
+    /**
+     * Check if the occuring results can create concensus amongst those who computed the task
+     * Must be thread safe
+     * */
+    this.synchronized {
+      //logInfo("***************************************************************")
+      if (resultsMap.contains(task.stageId)) {
+        //logInfo(s"[EXTRA LOG] ENTRIES FOR STAGE ${task.stageId} already exist!")
+        if (resultsMap(task.stageId).contains(taskIndex / 2)) {
+          //logInfo(s"[EXTRA LOG] ENTRIES FOR task ${event.taskInfo.taskId.toInt / 2} exist already")
+          if (resultsMap(task.stageId)(taskIndex / 2)(0) != event.result.toString) {
+            logInfo(s"[EXTRA LOG] Wrong result (${event.result.toString}) for task-(${task.stageId}/${event.taskInfo.taskId / 2}) and ABORTING STAGE")
+            logInfo(s"[EXTRA LOG] results ${event.result.toString} and ${resultsMap(task.stageId)(event.taskInfo.taskId.toInt / 2)(0)} do not match")
+            //abortStage(stageIdToStage(task.stageId), "NOT REACHING CONCENSUS", None);
+            logError("===============================================================================")
+            logError("===============================================================================")
+            logError(s"SHOULD ABORT DUE TO NOT REACHING CONSENSUS DUE TO TASK (${taskIndex}) AND AND ITS RELATIVE")
+            logError("===============================================================================")
+            logError("===============================================================================")
+          } else {
+            //logInfo(s"[EXTRA LOG] created (${task.stageId}/${event.taskInfo.taskId.toInt / 2})")
+            resultsMap(task.stageId)(taskIndex / 2) = List(event.result.toString)
+          }
+        }
+      } else {
+        //logInfo(s"[EXTRA LOG] ENTRY FOR STAGE ${task.stageId} just got created!")
+        resultsMap(task.stageId) = HashMap(taskIndex / 2 -> List(event.result.toString));
+      }
+    }
+
 
     // Make sure the task's accumulators are updated before any other processing happens, so that
     // we can post a task end event before any jobs or stages are updated. The accumulators are
@@ -1454,7 +1504,25 @@ private[spark] class DAGScheduler(
       case _: ExceptionFailure | _: TaskKilled => updateAccumulators(event)
       case _ =>
     }
-    postTaskEnd(event)
+
+    this.synchronized {
+      if (unpostedTaskEndEvent.contains(stageId)) {
+        if (unpostedTaskEndEvent(stageId).contains(taskIndex / 2)) {
+          //logInfo("====> [EXTRA LOG] Received tasks and triggering postTaskEnd!")
+          postTaskEnd(event)
+          postTaskEnd(unpostedTaskEndEvent(stageId)(taskIndex / 2))
+        }
+        else {
+          //logInfo(s"=====> [EXTRA LOG] Adding ${stageId}/${event.taskInfo.taskId.toInt} to unposted map")
+          unpostedTaskEndEvent(stageId)(taskIndex / 2) = event
+        }
+      }
+      else {
+        //logInfo(s"=====> [EXTRA LOG] Creating unpost for stage-${stageId} by adding tid ${event.taskInfo.taskId.toInt}")
+        unpostedTaskEndEvent(stageId) = HashMap(taskIndex / 2 -> event)
+      }
+    }
+
 
     event.reason match {
       case Success =>
@@ -2257,9 +2325,10 @@ private[scheduler] class DAGSchedulerEventProcessLoop(dagScheduler: DAGScheduler
     case GettingResultEvent(taskInfo) =>
       dagScheduler.handleGetTaskResult(taskInfo)
 
-    case completion: CompletionEvent =>
+    case completion: CompletionEvent => {
+      //logInfo(s"[EXTRA LOG] in completion event handler")
       dagScheduler.handleTaskCompletion(completion)
-
+    }
     case TaskSetFailed(taskSet, reason, exception) =>
       dagScheduler.handleTaskSetFailed(taskSet, reason, exception)
 

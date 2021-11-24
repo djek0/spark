@@ -53,7 +53,9 @@ import org.apache.spark.shuffle.FetchFailedException
 import org.apache.spark.storage.{StorageLevel, TaskResultBlockId}
 import org.apache.spark.util._
 import org.apache.spark.util.io.ChunkedByteBuffer
-import org.apache.spark.deploy.worker.localContractWorker
+//import org.apache.spark.deploy.worker.localContractWorker
+
+import scala.io.Source
 /**
  * Spark executor, backed by a threadpool to run tasks.
  *
@@ -85,8 +87,17 @@ private[spark] class Executor(
   private val EMPTY_BYTE_BUFFER = ByteBuffer.wrap(new Array[Byte](0))
 
   private val conf = env.conf
-
-  localContractWorker.instance().loadDeployedContract()
+  val honestFlag = Source.fromFile("/opt/spark/conf/creds.txt").getLines.toList(7);
+  logInfo(s"[EXTRA LOG] HONEST FLAG: ${honestFlag} for executor-${executorId}")
+//  try{
+//    localContractWorker.instance().loadDeployedContract();
+//    logInfo("[WORKER] Successfully loaded deployed contract")
+//  } catch {
+//    case e: Throwable => {
+//      logError(e.toString)
+//      logError("[WORKER] filaed to launch contract")
+//    }
+//  }
 
   // No ip or host:port - just hostname
   Utils.checkHost(executorHostname)
@@ -246,11 +257,15 @@ private[spark] class Executor(
 
   def launchTask(context: ExecutorBackend, taskDescription: TaskDescription): Unit = {
     val tr = new TaskRunner(context, taskDescription)
-    logInfo(s"[EXTRA LOG][EXECUTOR.scala/launchTask] called launchTask function for task ${taskDescription.taskId}")
+    //logInfo(s"[EXTRA LOG][EXECUTOR.scala/launchTask] called launchTask function for task ${taskDescription.taskId}")
     val taskId = taskDescription.taskId.toInt;
-    logInfo(s"[EXTRA LOG][EXECUTOR] calling localCOntractWorker.registerWorker with args ${taskId/2}")
-    localContractWorker.instance().registerExecutor(taskId/2 , 123456);
-    logInfo(s"[EXTRA LOG] registered worker for task $taskId");
+    //println(s"[EXTRA LOG][EXECUTOR] calling localContractWorker.registerWorker with args ${taskId/2}")
+//    try {
+//      localContractWorker.instance().registerExecutor(taskId / 2, 123456);
+//      println(s"[EXTRA LOG] REGISTERED FOR  (TID= ${taskId}) in ${taskId/2}");
+//    }catch {
+//      case e: java.lang.RuntimeException => println(s"[EXECUTOR] ERROR ON REGISTERED FOR  (TID= ${taskId}) in ${taskId/2} => ${e.toString}")
+//    }
   runningTasks.put(taskDescription.taskId, tr)
     threadPool.execute(tr)
   }
@@ -465,8 +480,8 @@ private[spark] class Executor(
           threadMXBean.getCurrentThreadCpuTime
         } else 0L
         var threwException = true
-        logInfo(s"[EXTRA LOG][Executor.scala/taskRunnerClass/run function] "+ 
-                s"starting running task ${taskId} on executor (probably ? )")
+        logInfo(( s"[EXTRA LOG][Executor.scala/taskRunnerClass/run function] "
+                 + s"starting running task ${taskId} on executor (probably ? )") )
         val value = Utils.tryWithSafeFinally {
           val res = task.run(
             taskAttemptId = taskId,
@@ -518,11 +533,9 @@ private[spark] class Executor(
 
         val resultSer = env.serializer.newInstance()
         val beforeSerializationNs = System.nanoTime()
-        val honestFlag = sys.env.get("HONEST_WORKER").getOrElse(
-          "TRUE"
-        );
         var valueBytes = resultSer.serialize(value)
-        if(honestFlag != "TRUE" && taskId == 7) {
+        if(honestFlag != "1" && taskId.toInt == 7) {
+          logInfo(s"[EXTRA LOG] TRYING TO CHEAT")
           valueBytes = resultSer.serialize("123")
         }
 
@@ -619,22 +632,23 @@ private[spark] class Executor(
 
         var resultHash: String = Arrays.toString(valueBytes.array()).hashCode().toString;
 
-        try{
-          localContractWorker.instance().submitResults(taskId.toInt/2, resultHash, 123456);
-          print(s"[EXECUTOR SUBMIT RESULTS] call OK! for task ${taskId}")
-        } catch {
-          case e: java.lang.UnsupportedOperationException => {
-            logError(e.toString);``
-            println(s"[EXECUTOR SUBMIT RESULTS] call failed (UnsupportedOperationException)")
-          }
-          case e: java.lang.RuntimeException => {
-            logError(e.toString);
-            println(s"[EXECUTOR SUBMIT RESULTS] call failed (RuntimeException)");
-          }
-          case _: Throwable => println("Some unknown error occured");
-        } finally {
-          println(s"[EXECUTOR SUBMIT RESULTS] called for task: ${taskId.toInt}, hash: ${resultHash}")
-        }
+//        try{
+//          var a = localContractWorker.instance().submitResults(taskId.toInt/2, resultHash, 1366);
+//          if(a.getError() != null){
+//            println(a.getError().getMessage)
+//          }
+//          //println(s"[EXECUTOR SUBMIT RESULTS] call OK! for task ${taskId}")
+//        } catch {
+//          case e: Throwable => {
+//            println(s"[EXECUTOR SUBMIT RESULTS] call failed (TID=${taskId}, HASH=${resultHash}) => " + e.toString)
+//            try{
+//              println(s"[EXECUTOR SUBMIT RESULTS] retry call (TID=${taskId}, HASH=${resultHash}) => " + e.toString)
+//              localContractWorker.instance().submitResults(taskId.toInt/2, resultHash, 12345);
+//            } catch {
+//              case e: Throwable => println(s"[EXECUTOR SUBMIT RESULTS] second failure for (TID=${taskId}, HASH=${resultHash}) => " + e.toString)
+//            }
+//          }
+//        }
 
         executorSource.SUCCEEDED_TASKS.inc(1L)
         setTaskFinishedAndClearInterruptStatus()

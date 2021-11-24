@@ -213,8 +213,8 @@ private[spark] class CoarseGrainedExecutorBackend(
 
   override def statusUpdate(taskId: Long, state: TaskState, data: ByteBuffer): Unit = {
     val resources = taskResources.getOrElse(taskId, Map.empty[String, ResourceInformation])
-    logInfo("[EXTRA LOG][CoarseGrainedExecutorBackend/statuusUpdate] calling StatusUpdate() function")
     val msg = StatusUpdate(executorId, taskId, state, data, resources)
+    logInfo(s"[EXTRA LOG] : In status update got result ${data} for TID-${taskId}")
     if (TaskState.isFinished(state)) {
       taskResources.remove(taskId)
     }

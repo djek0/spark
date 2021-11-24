@@ -41,7 +41,7 @@ import org.apache.spark.resource.{ResourceRequirement, ResourceUtils}
 import org.apache.spark.rpc._
 import org.apache.spark.serializer.{JavaSerializer, Serializer}
 import org.apache.spark.util.{SparkUncaughtExceptionHandler, ThreadUtils, Utils}
-import contract.localGanaceDeploy
+///import contract.localGanaceDeploy
 
 
 private[deploy] class Master(
@@ -143,8 +143,26 @@ private[deploy] class Master(
     logInfo("Starting Spark master at " + masterUrl)
     logInfo(s"Running Spark version ${org.apache.spark.SPARK_VERSION}")
     webUi = new MasterWebUI(this, webUiPort)
-    localGanaceDeploy.instance().loadDeployedContract();
-    logInfo("[MASTER] Successfully loaded deployed Contract ")
+//    try {
+//      localGanaceDeploy.instance().loadDeployedContract();
+//      logInfo("[MASTER] LOADED DEPLOYED CONTRACT ")
+//    } catch {
+//      case e: Throwable => {
+//        logError("[MASTER] FAILED TO LOAD CONTRACT");
+//        logError(e.toString);
+//      }
+//    }
+
+//    try {
+//      localGanaceDeploy.instance().startJob();
+//      logInfo("[CLIENT] STARTED NEW JOB")
+//    } catch {
+//      case e: Throwable => {
+//        logError("[CLIENT] FAILED TO START NEW JOB");
+//        logError(e.toString);
+//      }
+//    }
+
 
     webUi.bind()
     masterWebUiUrl = webUi.webUrl
@@ -1149,14 +1167,14 @@ private[deploy] object Master extends Logging {
   }
 }
 
-object localGanaceDeploy {
-  val filename: String = "/home/john/personal/spark/conf/creds.txt"
-  val creds: List[String] =  Source.fromFile(filename).getLines.toList
-  val accountNumber = creds(1)
-  val privateKey = creds(2) //"74af6a7b57eeae89d98a9309dc514ee89c28bdf2af8ab76c4943e2144313bbab"
-  val contractAddress = creds(0)
-  val conInst = new localGanaceDeploy(accountNumber, contractAddress, privateKey);
-  def instance(): localGanaceDeploy = {
-      conInst
-  }
-}
+//object localGanaceDeploy {
+//  val filename: String = "/opt/spark/conf/creds.txt"
+//  val creds: List[String] =  Source.fromFile(filename).getLines.toList
+//  val accountNumber = creds(1)
+//  val privateKey = creds(2) //"74af6a7b57eeae89d98a9309dc514ee89c28bdf2af8ab76c4943e2144313bbab"
+//  val contractAddress = creds(0)
+//  val conInst = new localGanaceDeploy(accountNumber, contractAddress, privateKey);
+//  def instance(): localGanaceDeploy = {
+//      conInst
+//  }
+//}

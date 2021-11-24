@@ -37,7 +37,7 @@ import org.apache.spark.scheduler.SchedulingMode.SchedulingMode
 import org.apache.spark.scheduler.TaskLocality.TaskLocality
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util.{AccumulatorV2, SystemClock, ThreadUtils, Utils}
-import org.apache.spark.deploy.master.localGanaceDeploy
+//import org.apache.spark.deploy.master.localGanaceDeploy
 
 /**
  * Schedules tasks for multiple types of clusters by acting through a SchedulerBackend.
@@ -111,6 +111,14 @@ private[spark] class TaskSchedulerImpl(
   // Protected by `this`
   val taskIdToExecutorId = new HashMap[Long, String]
 
+
+  /**
+   * Added by john
+   */
+  val taskIdtoHost = new HashMap[Long, String]
+  var counter_resource: Int = 0;
+
+
   @volatile private var hasReceivedTask = false
   @volatile private var hasLaunchedTask = false
   private val starvationTimer = new Timer(true)
@@ -176,6 +184,24 @@ private[spark] class TaskSchedulerImpl(
     }
   }
 
+  private def checkForIllegalTaskAssignement(taskIndex: Long, host: String) = {
+    if(taskIndex%2==0){
+      if(taskIdtoHost.contains(taskIndex+1) && taskIdtoHost(taskIndex+1)==host){
+        logError("=============================================")
+        (logError(s"[EXTRA LOG] cannot assigned task-${taskIndex} " +
+          s"to host $host because ${taskIndex+1} is already assigned to it!"))
+        logError("=============================================")
+      }
+    } else {
+      if (taskIdtoHost.contains(taskIndex - 1) && taskIdtoHost(taskIndex - 1) == host) {
+        logError("=============================================")
+        (logError(s"[EXTRA LOG] cannot assigned task-${taskIndex} " +
+          s"to host $host because ${taskIndex - 1} is already assigned to it!"))
+        logError("=============================================")
+      }
+    }
+  }
+
   override def setDAGScheduler(dagScheduler: DAGScheduler): Unit = {
     this.dagScheduler = dagScheduler
   }
@@ -216,8 +242,8 @@ private[spark] class TaskSchedulerImpl(
   override def submitTasks(taskSet: TaskSet): Unit = {
     val tasks = taskSet.tasks
     logInfo("Adding task set " + taskSet.id + " with " + tasks.length + " tasks")
-    logInfo(s"[EXTRA LOG][submitTasks] taskSet ${taskSet.id} with ${tasks.length} tasks")
-    logInfo(s"[EXTRA LOG][submitTasks] calling initialize context!")
+//    logInfo(s"[EXTRA LOG][submitTasks] taskSet ${taskSet.id} with ${tasks.length} tasks")
+//    logInfo(s"[EXTRA LOG][submitTasks] calling initialize context!")
     val stageId = taskSet.stageId
     val job = taskSet.toString
     this.synchronized {
@@ -226,10 +252,10 @@ private[spark] class TaskSchedulerImpl(
      // val job = taskSet.priority //according to the call in dagSceduler.
      val stageTaskSets =
         taskSetsByStageIdAndAttempt.getOrElseUpdate(stage, new HashMap[Int, TaskSetManager])
-      var ids= (0 to tasks.length).filter(x => x%2 == 0)
+      var ids= (0 to tasks.length-1).filter(x => x%2 == 0).map(x => x/2)
       logInfo(s"all ids: $ids")
-      localGanaceDeploy.conInst.loadDeployedContract();
-      ids.foreach(id => localGanaceDeploy.instance().initializeContext(id, 12345, 123456));;
+      //localGanaceDeploy.conInst.loadDeployedContract();
+      //ids.foreach(id => localGanaceDeploy.instance().initializeContext(id, 12345, 123456));;
 
       // Mark all the existing TaskSetManagers of this stage as zombie, as we are adding a new one.
       // This is necessary to handle a corner case. Let's say a stage has 10 partitions and has 2
@@ -352,6 +378,14 @@ private[spark] class TaskSchedulerImpl(
     var launchedTask = false
     // nodes and executors that are blacklisted for the entire application have already been
     // filtered out by this point
+    //logInfo(s"[EXTRA LOG] shuffled offers: => $shuffledOffers")
+//    println("=============printing tasks==================================")
+//    tasks.foreach(println)
+//    println("==============end of printing tasks=======================================")
+//    counter_resource = counter_resource + 1;
+//    logInfo(s"[EXTRA LOG] RESOURCE_OFFER CALLED ${counter_resource} TIMES")
+//    logInfo("===============================================")
+
     for (i <- 0 until shuffledOffers.size) {
       val execId = shuffledOffers(i).executorId
       val host = shuffledOffers(i).host
@@ -361,7 +395,14 @@ private[spark] class TaskSchedulerImpl(
           for (task <- taskSet.resourceOffer(execId, host, maxLocality, availableResources(i))) {
             tasks(i) += task
             val tid = task.taskId
-            logInfo(s"[EXTRA LOG]assigning task ${tid} to host ${host}")
+            val taskIndex = task.index
+
+            /**
+             * Added by john
+             */
+            checkForIllegalTaskAssignement(taskIndex, host);
+
+            taskIdtoHost(taskIndex) = host
             taskIdToTaskSetManager.put(tid, taskSet)
             taskIdToExecutorId(tid) = execId
             executorIdToRunningTaskIds(execId).add(tid)
@@ -381,9 +422,9 @@ private[spark] class TaskSchedulerImpl(
               // The executor address is expected to be non empty.
               addressesWithDescs += (shuffledOffers(i).address.get -> task)
             }
-            logInfo(s"[EXTRA LOG][in TaskSchedImpl/resourceOfferSingleTaskSet] Launching Task ${tid} " + 
-                    s"on host ${host} over the partition ${task.partitionId}")
-            
+//            logInfo(s"[EXTRA LOG][in TaskSchedImpl/resourceOfferSingleTaskSet] Launching Task ${tid} " +
+//                    s"on host ${host} over the partition ${task.partitionId}")
+//
             launchedTask = true
           }
         } catch {

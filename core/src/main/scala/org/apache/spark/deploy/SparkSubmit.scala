@@ -57,6 +57,9 @@ import org.apache.spark.internal.config.UI._
 import org.apache.spark.launcher.SparkLauncher
 import org.apache.spark.util._
 
+//import contract.localGanaceDeploy
+
+import scala.io.Source
 /**
  * Whether to submit, kill, or request the status of an application.
  * The latter two operations are currently supported only for standalone and Mesos cluster modes.
@@ -80,16 +83,6 @@ private[spark] class SparkSubmit extends Logging {
   def doSubmit(args: Array[String]): Unit = {
     // Initialize logging if it hasn't been done yet. Keep track of whether logging needs to
     // be reset before the application starts.
-
-    val testThread = new Thread{
-      override def run {
-        for( i <- 1 to 10) {
-          println("[THREAD] in the thread!");
-          Thread.sleep(200);
-        }
-      }
-    }
-    testThread.start()
 
     logInfo(s"[EXTRA LOG] in SparkSubmit artifact, doSubmit function!")
     val uninitLog = initializeLogIfNecessary(true, silent = true)
@@ -168,6 +161,28 @@ private[spark] class SparkSubmit extends Logging {
   private def submit(args: SparkSubmitArguments, uninitLog: Boolean): Unit = {
 
     def doRunMain(): Unit = {
+
+//      try {
+//        localContractClient.instance().loadDeployedContract();
+//        logInfo("[MASTER] LOADED DEPLOYED CONTRACT ")
+//      } catch {
+//        case e: Throwable => {
+//          logError("[MASTER] FAILED TO LOAD CONTRACT");
+//          logError(e.toString);
+//        }
+//      }
+//
+//      try {
+//        localContractClient.instance().startJob();
+//        logInfo("[CLIENT] STARTED NEW JOB")
+//      } catch {
+//        case e: Throwable => {
+//          logError("[CLIENT] FAILED TO START NEW JOB");
+//          logError(e.toString);
+//        }
+//      }
+
+
       if (args.proxyUser != null) {
         val proxyUser = UserGroupInformation.createProxyUser(args.proxyUser,
           UserGroupInformation.getCurrentUser())
@@ -1472,3 +1487,15 @@ private[spark] trait SparkSubmitOperation {
 
   def supports(master: String): Boolean
 }
+
+//object localContractClient{
+//  val filename: String = "/home/john/personal/spark/conf/creds.txt"
+//  val creds: List[String] =  Source.fromFile(filename).getLines.toList
+//  val accountNumber = creds(5)
+//  val privateKey = creds(6)
+//  val contractAddress = creds(0)
+//  val conInst = new localGanaceDeploy(accountNumber, contractAddress, privateKey);
+//  def instance(): localGanaceDeploy = {
+//    conInst
+//  }
+//}

@@ -44,7 +44,7 @@ import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
 import org.apache.spark.util.{SignalUtils, SparkUncaughtExceptionHandler, ThreadUtils, Utils}
-import contract.localGanaceDeploy
+//import contract.localGanaceDeploy
 
 private[deploy] class Worker(
     override val rpcEnv: RpcEnv,
@@ -842,7 +842,7 @@ private[deploy] object Worker extends Logging {
     val externalShuffleServiceEnabled = conf.get(config.SHUFFLE_SERVICE_ENABLED)
     val sparkWorkerInstances = scala.sys.env.getOrElse("SPARK_WORKER_INSTANCES", "1").toInt
     require(externalShuffleServiceEnabled == false || sparkWorkerInstances <= 1,
-      "Starting multiple workers on one host is failed because we may launch no more than one " +
+      "Starting multiple workers on one host is failed  because we may launch no more than one " +
         "external shuffle service on each host, please set spark.shuffle.service.enabled to " +
         "false or set SPARK_WORKER_INSTANCES to 1 to resolve the conflict.")
     rpcEnv.awaitTermination()
@@ -892,14 +892,14 @@ private[deploy] object Worker extends Logging {
   }
 }
 
-object localContractWorker{
-  val filename: String = "/home/john/personal/spark/conf/creds.txt"
-  val creds: List[String] =  Source.fromFile(filename).getLines.toList
-  val accountNumber = creds(3)
-  val privateKey = creds(4)
-  val contractAddress = creds(0)
-  val conInst = new localGanaceDeploy(accountNumber, contractAddress, privateKey);
-  def instance(): localGanaceDeploy = {
-    conInst
-  }
-}
+//object localContractWorker{
+//  val filename: String = "/home/john/personal/spark/conf/creds.txt"
+//  val creds: List[String] =  Source.fromFile(filename).getLines.toList
+//  val accountNumber = creds(3)
+//  val privateKey = creds(4)
+//  val contractAddress = creds(0)
+//  val conInst = new localGanaceDeploy(accountNumber, contractAddress, privateKey);
+//  def instance(): localGanaceDeploy = {
+//    conInst
+//  }
+//}
