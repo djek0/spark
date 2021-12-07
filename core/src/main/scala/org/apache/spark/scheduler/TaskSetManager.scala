@@ -17,23 +17,24 @@
 
 package org.apache.spark.scheduler
 
-import java.io.NotSerializableException
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.io.NotSerializableException
 
 import scala.collection.immutable.Map
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
 import scala.math.max
 import scala.util.control.NonFatal
-
 import org.apache.spark._
 import org.apache.spark.TaskState.TaskState
-import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.{Logging, config}
 import org.apache.spark.internal.config._
 import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.scheduler.SchedulingMode._
 import org.apache.spark.util.{AccumulatorV2, Clock, LongAccumulator, SystemClock, Utils}
 import org.apache.spark.util.collection.MedianHeap
+
+import scala.collection.mutable
 
 /**
  * Schedules the tasks within a single TaskSet in the TaskSchedulerImpl. This class keeps track of
@@ -73,7 +74,7 @@ private[spark] class TaskSetManager(
   /**
    * Added by john
    */
-  val taskIndexToHost = new HashMap[Long, String]
+  val taskIndexToHost = new mutable.HashMap[Int, HashMap[Long, String]]
 
 
   val tasks = taskSet.tasks
@@ -136,14 +137,17 @@ private[spark] class TaskSetManager(
    * @param host: String, hostaname || ip
    * @return Boolean
    */
-  private[scheduler] def isRelativeOnSameNode(index: Long, host: String): Boolean = {
-    if ((index % 2 == 0 && taskIndexToHost.contains(index+1) && taskIndexToHost(index+1) == host) ||
-      (index % 2 == 1 && taskIndexToHost.contains(index-1) && taskIndexToHost(index-1)== host)) {
-      true
+  private[scheduler] def isRelativeOnSameNode(index: Long, host: String, stage_id: Int): Boolean = {
+
+    if(stage_id >= 0) {
+      if (taskIndexToHost.contains(stage_id)) {
+        if ((index % 2 == 0 && taskIndexToHost(stage_id).contains(index + 1) && taskIndexToHost(stage_id)(index + 1) == host) ||
+          (index % 2 == 1 && taskIndexToHost(stage_id).contains(index - 1) && taskIndexToHost(stage_id)(index - 1) == host)) {
+          return true
+        }
+      }
     }
-    else{
-      false
-    }
+    false
   }
 
   private[scheduler] val runningTasksSet = new HashSet[Long]
@@ -298,14 +302,15 @@ private[spark] class TaskSetManager(
       execId: String,
       host: String,
       list: ArrayBuffer[Int],
-      speculative: Boolean = false): Option[Int] = {
+      speculative: Boolean = false,
+      list_id: Int = -1): Option[Int] = {
     var indexOffset = list.size
     while (indexOffset > 0) {
       indexOffset -= 1
       val index = list(indexOffset)
       if (!isTaskBlacklistedOnExecOrNode(index, execId, host) &&
           !(speculative && hasAttemptOnHost(index, host)) &&
-          !isRelativeOnSameNode(index, host)) {
+          !isRelativeOnSameNode(index, host, list_id)) {
         // This should almost always be list.trimEnd(1) to remove tail
         list.remove(indexOffset)
         // Speculatable task should only be launched when at most one copy of the
@@ -343,24 +348,28 @@ private[spark] class TaskSetManager(
   private def dequeueTask(
       execId: String,
       host: String,
-      maxLocality: TaskLocality.Value): Option[(Int, TaskLocality.Value, Boolean)] = {
-    // Tries to schedule a regular task first; if it returns None, then schedules
-    // a speculative task
-    dequeueTaskHelper(execId, host, maxLocality, false).orElse(
-      dequeueTaskHelper(execId, host, maxLocality, true))
-  }
+      maxLocality: TaskLocality.Value,
+      list_id: Int = -1): Option[(Int, TaskLocality.Value, Boolean)] = {
+      // Tries to schedule a regular task first; if it returns None, then schedules
+      // a speculative task
+      this.synchronized {
+        dequeueTaskHelper(execId, host, maxLocality, speculative = false, list_id = list_id).orElse(
+          dequeueTaskHelper(execId, host, maxLocality, speculative = true, list_id = list_id))
+      }
+    }
 
   protected def dequeueTaskHelper(
       execId: String,
       host: String,
       maxLocality: TaskLocality.Value,
-      speculative: Boolean): Option[(Int, TaskLocality.Value, Boolean)] = {
+      speculative: Boolean,
+      list_id: Int = -1): Option[(Int, TaskLocality.Value, Boolean)] = {
     if (speculative && speculatableTasks.isEmpty) {
       return None
     }
     val pendingTaskSetToUse = if (speculative) pendingSpeculatableTasks else pendingTasks
     def dequeue(list: ArrayBuffer[Int]): Option[Int] = {
-      val task = dequeueTaskFromList(execId, host, list, speculative)
+      val task = dequeueTaskFromList(execId, host, list, speculative, list_id)
       if (speculative && task.isDefined) {
         speculatableTasks -= task.get
       }
@@ -437,11 +446,15 @@ private[spark] class TaskSetManager(
         }
       }
 
-      dequeueTask(execId, host, allowedLocality).map { case ((index, taskLocality, speculative)) =>
+      dequeueTask(execId, host, allowedLocality, taskSet.stageId).map { case ((index, taskLocality, speculative)) =>
         // Found a task; do some bookkeeping and return a task description
         val task = tasks(index)
         val taskId = sched.newTaskId()
-        taskIndexToHost(index) = host
+        if (taskIndexToHost.contains(taskSet.stageId)) {
+          taskIndexToHost(taskSet.stageId).put(index.toLong,host)
+        } else{
+          taskIndexToHost.put(taskSet.stageId,HashMap(index.toLong -> host))
+        }
         // Do various bookkeeping
         copiesRunning(index) += 1
         val attemptNum = taskAttempts(index).size
@@ -495,7 +508,7 @@ private[spark] class TaskSetManager(
         }.toMap
 
         sched.dagScheduler.taskStarted(task, info)
-        println(s"[TASK SET MANAGER] tid $taskId for task-index $index")
+        println(s"[TASK SET MANAGER] tid $taskId for task-index $index [stage ${taskSet.stageId}]")
         new TaskDescription(
           taskId,
           attemptNum,
@@ -720,7 +733,6 @@ private[spark] class TaskSetManager(
   def handleSuccessfulTask(tid: Long, result: DirectTaskResult[_]): Unit = {
     val info = taskInfos(tid)
     val index = info.index
-    logInfo(s"[EXTRA LOG] handleSuccessfulTask() for task $tid")
     // Check if any other attempt succeeded before this and this attempt has not been handled
     if (successful(index) && killedByOtherAttempt.contains(tid)) {
       // Undo the effect on calculatedTasks and totalResultSize made earlier when

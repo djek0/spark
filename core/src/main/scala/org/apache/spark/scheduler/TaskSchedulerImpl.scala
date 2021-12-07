@@ -400,7 +400,7 @@ private[spark] class TaskSchedulerImpl(
             /**
              * Added by john
              */
-            checkForIllegalTaskAssignement(taskIndex, host);
+            //checkForIllegalTaskAssignement(taskIndex, host);
 
             taskIdtoHost(taskIndex) = host
             taskIdToTaskSetManager.put(tid, taskSet)

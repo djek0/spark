@@ -19,6 +19,12 @@ package org.apache.spark.scheduler
 
 import java.nio.ByteBuffer
 import java.util.concurrent.{ExecutorService, RejectedExecutionException}
+import java.nio._
+import java.util._
+import java.util.Properties
+import java.util.concurrent._
+import java.util.concurrent.atomic.AtomicBoolean
+import java.math.BigInteger;
 
 import scala.language.existentials
 import scala.util.control.NonFatal
@@ -73,6 +79,13 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
               // We should call it here, so that when it's called again in
               // "TaskSetManager.handleSuccessfulTask", it does not need to deserialize the value.
               directResult.value(taskResultSerializer.get())
+//              logInfo("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+//              logInfo(s"[EXTRA LOG][TASK RESULT GETTER] deserialized result: for task ${tid}")
+//              val resultBufferAsArray =  Arrays.toString(directResult.valueBytes.array())
+//              val resultSize = resultBufferAsArray.size;
+//              val hashValueCandidate = resultBufferAsArray.slice(0, 250)
+//              println(hashValueCandidate)
+//              println(s"[EXTRA LOG] hash ${hashValueCandidate.hashCode().toString} FOR TID $tid, original byte array size $resultSize")
               (directResult, serializedData.limit())
             case IndirectTaskResult(blockId, size) =>
               if (!taskSetManager.canFetchMoreResults(size)) {
@@ -99,6 +112,9 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
               // force deserialization of referenced value
               deserializedResult.value(taskResultSerializer.get())
               sparkEnv.blockManager.master.removeBlock(blockId)
+//              logInfo("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+//              logInfo(s"[EXTRA LOG][TASK RESULT GETTER 2] deserialized result: for task ${tid}")
+//              println(Arrays.toString(deserializedResult.valueBytes.array()).hashCode().toString)
               (deserializedResult, size)
           }
 

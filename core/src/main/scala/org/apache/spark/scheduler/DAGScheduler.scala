@@ -42,6 +42,7 @@ import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.storage._
 import org.apache.spark.storage.BlockManagerMessages.BlockManagerHeartbeat
 import org.apache.spark.util._
+
 //import org.apache.spark.deploy.master.localGanaceDeploy
 
 /**
@@ -231,7 +232,6 @@ private[spark] class DAGScheduler(
    * EXTRA DOCS BY JOHN
    */
 
-
   /**
    * resultsMap stores results for all tasks so comparison
    */
@@ -243,6 +243,51 @@ private[spark] class DAGScheduler(
    *  only after all related atsks have been submitted.
    */
   var unpostedTaskEndEvent = new HashMap[Int, HashMap[Int, CompletionEvent]]
+  var taskPerStage = new HashMap[Int, Int]
+  var completedTasksPerStage = new HashMap[Int, Int]
+  var partitionPerResultStage = new HashMap[Int, Int] // partitionId => events completed for this partition
+
+  def addPartitionPerResultStage(partitionId: Int): Unit= {
+    if (partitionPerResultStage.contains(partitionId)){
+      partitionPerResultStage(partitionId) = partitionPerResultStage(partitionId) + 1
+    } else {
+      partitionPerResultStage(partitionId) = 1
+    }
+  }
+
+  def addTasksPerStage(stage_id: Int, tasksLen: Int): Unit = {
+    if( taskPerStage.contains(stage_id)) {
+      taskPerStage(stage_id) = taskPerStage(stage_id) + tasksLen
+    }
+    else{
+      taskPerStage(stage_id) = tasksLen
+    }
+  }
+
+  def addCompletedTaskPerStage(stage_id: Int, tasksLen: Int): Unit = {
+    if( completedTasksPerStage.contains(stage_id)) {
+      completedTasksPerStage(stage_id) = completedTasksPerStage(stage_id) + tasksLen
+    }
+    else{
+      completedTasksPerStage(stage_id) = tasksLen
+    }
+  }
+
+  def canEndPartitionForResultStage(partitionId: Int): Boolean={
+    if (partitionPerResultStage.contains(partitionId))
+      return (partitionPerResultStage(partitionId) >= 2)
+
+
+    false
+  }
+
+  def canMarkStageAsFinished(stage_id: Int): Boolean = {
+    if(taskPerStage.contains(stage_id) && completedTasksPerStage.contains(stage_id)){
+      println(s"[EXTRA LOG][DAG] tasks: ${taskPerStage(stage_id)}, completed ${completedTasksPerStage(stage_id)}")
+      return (taskPerStage(stage_id) == completedTasksPerStage(stage_id))
+    }
+    false
+  }
 
   /**
    * Time in seconds to wait between a max concurrent tasks check failure and the next check.
@@ -1313,6 +1358,7 @@ private[spark] class DAGScheduler(
       taskScheduler.submitTasks(new TaskSet(
         tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties))
 
+      addTasksPerStage(stage.id, tasks.toArray.size)
      // sc.taskScheduler2.submitTasks(new TaskSet(
      //   tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties))
       
@@ -1430,6 +1476,7 @@ private[spark] class DAGScheduler(
     val taskIndex = event.taskInfo.index
     //logInfo(s"[EXTRA LOG] in handleTaskCompletion (TID = ${event.taskInfo.taskId}) with result ${event.result}")
 
+
     outputCommitCoordinator.taskCompleted(
       stageId,
       task.stageAttemptId,
@@ -1455,6 +1502,8 @@ private[spark] class DAGScheduler(
      * Check if the occuring results can create concensus amongst those who computed the task
      * Must be thread safe
      * */
+    println(s"****** task index ${taskIndex}, stage ${task.stageId}, res type: ${event.result.getClass}")
+//    println(res: ${event.result.value()},)
     this.synchronized {
       //logInfo("***************************************************************")
       if (resultsMap.contains(task.stageId)) {
@@ -1462,14 +1511,14 @@ private[spark] class DAGScheduler(
         if (resultsMap(task.stageId).contains(taskIndex / 2)) {
           //logInfo(s"[EXTRA LOG] ENTRIES FOR task ${event.taskInfo.taskId.toInt / 2} exist already")
           if (resultsMap(task.stageId)(taskIndex / 2)(0) != event.result.toString) {
-            logInfo(s"[EXTRA LOG] Wrong result (${event.result.toString}) for task-(${task.stageId}/${event.taskInfo.taskId / 2}) and ABORTING STAGE")
-            logInfo(s"[EXTRA LOG] results ${event.result.toString} and ${resultsMap(task.stageId)(event.taskInfo.taskId.toInt / 2)(0)} do not match")
+            logInfo(s"[EXTRA LOG] Wrong result (${event.result.toString}) for task-(${task.stageId}/${taskIndex / 2}) and ABORTING STAGE")
+            logInfo(s"[EXTRA LOG] results ${event.result.toString} and ${resultsMap(task.stageId)(taskIndex / 2)(0)} do not match")
             //abortStage(stageIdToStage(task.stageId), "NOT REACHING CONCENSUS", None);
-            logError("===============================================================================")
-            logError("===============================================================================")
+            logError("===========================================================================================")
+            logError("===========================================================================================")
             logError(s"SHOULD ABORT DUE TO NOT REACHING CONSENSUS DUE TO TASK (${taskIndex}) AND AND ITS RELATIVE")
-            logError("===============================================================================")
-            logError("===============================================================================")
+            logError("===========================================================================================")
+            logError("===========================================================================================")
           } else {
             //logInfo(s"[EXTRA LOG] created (${task.stageId}/${event.taskInfo.taskId.toInt / 2})")
             resultsMap(task.stageId)(taskIndex / 2) = List(event.result.toString)
@@ -1490,10 +1539,12 @@ private[spark] class DAGScheduler(
         task match {
           case rt: ResultTask[_, _] =>
             val resultStage = stage.asInstanceOf[ResultStage]
+            addPartitionPerResultStage(rt.partitionId)
             resultStage.activeJob match {
               case Some(job) =>
+                println(s"[EXTRA LOG][DAG] outputId = ${rt.outputId}")
                 // Only update the accumulator once for each result task.
-                if (!job.finished(rt.outputId)) {
+                if (!job.finished(rt.outputId) && canEndPartitionForResultStage(rt.partitionId)) {
                   updateAccumulators(event)
                 }
               case None => // Ignore update if task's job has finished.
@@ -1508,17 +1559,22 @@ private[spark] class DAGScheduler(
     this.synchronized {
       if (unpostedTaskEndEvent.contains(stageId)) {
         if (unpostedTaskEndEvent(stageId).contains(taskIndex / 2)) {
-          //logInfo("====> [EXTRA LOG] Received tasks and triggering postTaskEnd!")
-          postTaskEnd(event)
-          postTaskEnd(unpostedTaskEndEvent(stageId)(taskIndex / 2))
+          if(taskIndex % 2 == 0){
+            postTaskEnd(unpostedTaskEndEvent(stageId)(taskIndex / 2))
+            postTaskEnd(event)
+            addCompletedTaskPerStage(stageId, 2)
+          }
+          else{
+            postTaskEnd(event)
+            postTaskEnd(unpostedTaskEndEvent(stageId)(taskIndex / 2))
+            addCompletedTaskPerStage(stageId, 2)
+          }
         }
         else {
-          //logInfo(s"=====> [EXTRA LOG] Adding ${stageId}/${event.taskInfo.taskId.toInt} to unposted map")
           unpostedTaskEndEvent(stageId)(taskIndex / 2) = event
         }
       }
       else {
-        //logInfo(s"=====> [EXTRA LOG] Creating unpost for stage-${stageId} by adding tid ${event.taskInfo.taskId.toInt}")
         unpostedTaskEndEvent(stageId) = HashMap(taskIndex / 2 -> event)
       }
     }
@@ -1541,11 +1597,14 @@ private[spark] class DAGScheduler(
             val resultStage = stage.asInstanceOf[ResultStage]
             resultStage.activeJob match {
               case Some(job) =>
-                if (!job.finished(rt.outputId)) {
+                if (!job.finished(rt.outputId) && canEndPartitionForResultStage(rt.partitionId)) {
                   job.finished(rt.outputId) = true
                   job.numFinished += 1
                   // If the whole job has finished, remove it
-                  if (job.numFinished == job.numPartitions) {
+                  logInfo(s"[EXTRA LOG][DAG SCHEDULER] NUM FINISHED = ${job.numFinished}")
+                  logInfo(s"[EXTRA LOG][DAG SCHEDULER] NUM PARTITIONS = ${job.numPartitions}")
+//                  if (job.numFinished == job.numPartitions) {
+                  if(canMarkStageAsFinished(stageId)){
                     markStageAsFinished(resultStage)
                     cancelRunningIndependentStages(job, s"Job ${job.jobId} is finished.")
                     cleanupStateForJobAndIndependentStages(job)
@@ -1564,17 +1623,20 @@ private[spark] class DAGScheduler(
                       case e: UnsupportedOperationException =>
                         logWarning(s"Could not cancel tasks for stage $stageId", e)
                     }
+                    println(s"[EXTRA LOG][DAG] calling JobEnd()")
                     listenerBus.post(
                       SparkListenerJobEnd(job.jobId, clock.getTimeMillis(), JobSucceeded))
                   }
 
                   // taskSucceeded runs some user code that might throw an exception. Make sure
                   // we are resilient against that.
+                  // TODO: Next point to search into [john]
                   try {
+                    println(s"[EXTRA LOG][DAG] job.listener.taskSucceeded()")
                     job.listener.taskSucceeded(rt.outputId, event.result)
                   } catch {
                     case e: Throwable if !Utils.isFatalError(e) =>
-                      // TODO: Perhaps we want to mark the resultStage as failed?
+                      println(s"[EXTRA LOG][DAG] ANY EXEPTIONS ?????? ")
                       job.listener.jobFailed(new SparkDriverExecutionException(e))
                   }
                 }
