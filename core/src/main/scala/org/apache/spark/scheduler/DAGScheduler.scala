@@ -42,6 +42,7 @@ import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.storage._
 import org.apache.spark.storage.BlockManagerMessages.BlockManagerHeartbeat
 import org.apache.spark.util._
+import org.apache.spark.scheduler.TaskResultVerificationManager
 
 //import org.apache.spark.deploy.master.localGanaceDeploy
 
@@ -1502,34 +1503,38 @@ private[spark] class DAGScheduler(
      * Check if the occuring results can create concensus amongst those who computed the task
      * Must be thread safe
      * */
-    println(s"****** task index ${taskIndex}, stage ${task.stageId}, res type: ${event.result.getClass}")
-//    println(res: ${event.result.value()},)
-    this.synchronized {
-      //logInfo("***************************************************************")
-      if (resultsMap.contains(task.stageId)) {
-        //logInfo(s"[EXTRA LOG] ENTRIES FOR STAGE ${task.stageId} already exist!")
-        if (resultsMap(task.stageId).contains(taskIndex / 2)) {
-          //logInfo(s"[EXTRA LOG] ENTRIES FOR task ${event.taskInfo.taskId.toInt / 2} exist already")
-          if (resultsMap(task.stageId)(taskIndex / 2)(0) != event.result.toString) {
-            logInfo(s"[EXTRA LOG] Wrong result (${event.result.toString}) for task-(${task.stageId}/${taskIndex / 2}) and ABORTING STAGE")
-            logInfo(s"[EXTRA LOG] results ${event.result.toString} and ${resultsMap(task.stageId)(taskIndex / 2)(0)} do not match")
-            //abortStage(stageIdToStage(task.stageId), "NOT REACHING CONCENSUS", None);
-            logError("===========================================================================================")
-            logError("===========================================================================================")
-            logError(s"SHOULD ABORT DUE TO NOT REACHING CONSENSUS DUE TO TASK (${taskIndex}) AND AND ITS RELATIVE")
-            logError("===========================================================================================")
-            logError("===========================================================================================")
-          } else {
-            //logInfo(s"[EXTRA LOG] created (${task.stageId}/${event.taskInfo.taskId.toInt / 2})")
-            resultsMap(task.stageId)(taskIndex / 2) = List(event.result.toString)
-          }
-        }
-      } else {
-        //logInfo(s"[EXTRA LOG] ENTRY FOR STAGE ${task.stageId} just got created!")
-        resultsMap(task.stageId) = HashMap(taskIndex / 2 -> List(event.result.toString));
-      }
-    }
+//    println(s"****** task index ${taskIndex}, stage ${task.stageId}, res type: ${event.result.getClass}")
+////    println(res: ${event.result.value()},)
+//    this.synchronized {
+//      //logInfo("***************************************************************")
+//      if (resultsMap.contains(task.stageId)) {
+//        //logInfo(s"[EXTRA LOG] ENTRIES FOR STAGE ${task.stageId} already exist!")
+//        if (resultsMap(task.stageId).contains(taskIndex / 2)) {
+//          //logInfo(s"[EXTRA LOG] ENTRIES FOR task ${event.taskInfo.taskId.toInt / 2} exist already")
+//          if (resultsMap(task.stageId)(taskIndex / 2)(0) != event.result.toString) {
+//            logInfo(s"[EXTRA LOG] Wrong result (${event.result.toString}) for task-(${task.stageId}/${taskIndex / 2}) and ABORTING STAGE")
+//            logInfo(s"[EXTRA LOG] results ${event.result.toString} and ${resultsMap(task.stageId)(taskIndex / 2)(0)} do not match")
+//            //abortStage(stageIdToStage(task.stageId), "NOT REACHING CONCENSUS", None);
+//            logError("===========================================================================================")
+//            logError("===========================================================================================")
+//            logError(s"SHOULD ABORT DUE TO NOT REACHING CONSENSUS DUE TO TASK (${taskIndex}) AND AND ITS RELATIVE")
+//            logError("===========================================================================================")
+//            logError("===========================================================================================")
+//          } else {
+//            //logInfo(s"[EXTRA LOG] created (${task.stageId}/${event.taskInfo.taskId.toInt / 2})")
+//            resultsMap(task.stageId)(taskIndex / 2) = List(event.result.toString)
+//          }
+//        }
+//      } else {
+//        //logInfo(s"[EXTRA LOG] ENTRY FOR STAGE ${task.stageId} just got created!")
+//        resultsMap(task.stageId) = HashMap(taskIndex / 2 -> List(event.result.toString));
+//      }
+//    }
 
+      this.synchronized {
+        logInfo("Calling verifyResult() from TaskResultVerification")
+        TaskResultVerificationManager.verifyResult(event.taskInfo.taskId.toInt)
+      }
 
     // Make sure the task's accumulators are updated before any other processing happens, so that
     // we can post a task end event before any jobs or stages are updated. The accumulators are

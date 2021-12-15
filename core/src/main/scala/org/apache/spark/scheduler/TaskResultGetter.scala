@@ -34,7 +34,7 @@ import org.apache.spark.TaskState.TaskState
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.SerializerInstance
 import org.apache.spark.util.{LongAccumulator, ThreadUtils, Utils}
-
+import org.apache.spark.scheduler.TaskResultVerificationManager
 /**
  * Runs a thread pool that deserializes and remotely fetches (if necessary) task results.
  */
@@ -79,13 +79,15 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
               // We should call it here, so that when it's called again in
               // "TaskSetManager.handleSuccessfulTask", it does not need to deserialize the value.
               directResult.value(taskResultSerializer.get())
+              val hashSize: Long = directResult.metricPeaks(directResult.metricPeaks.length-1)
+              directResult.metricPeaks = directResult.metricPeaks.take(directResult.metricPeaks.length-1)
 //              logInfo("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
 //              logInfo(s"[EXTRA LOG][TASK RESULT GETTER] deserialized result: for task ${tid}")
-//              val resultBufferAsArray =  Arrays.toString(directResult.valueBytes.array())
-//              val resultSize = resultBufferAsArray.size;
-//              val hashValueCandidate = resultBufferAsArray.slice(0, 250)
+
 //              println(hashValueCandidate)
 //              println(s"[EXTRA LOG] hash ${hashValueCandidate.hashCode().toString} FOR TID $tid, original byte array size $resultSize")
+              logInfo("Calling addNewResultTasks from task verification manager")
+              TaskResultVerificationManager.addNewResultForTid(tid, hashSize.toString)
               (directResult, serializedData.limit())
             case IndirectTaskResult(blockId, size) =>
               if (!taskSetManager.canFetchMoreResults(size)) {

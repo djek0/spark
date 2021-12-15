@@ -33,6 +33,7 @@ import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.scheduler.SchedulingMode._
 import org.apache.spark.util.{AccumulatorV2, Clock, LongAccumulator, SystemClock, Utils}
 import org.apache.spark.util.collection.MedianHeap
+import org.apache.spark.scheduler.TaskResultVerificationManager
 
 import scala.collection.mutable
 
@@ -455,6 +456,9 @@ private[spark] class TaskSetManager(
         } else{
           taskIndexToHost.put(taskSet.stageId,HashMap(index.toLong -> host))
         }
+
+        val stageIndex = (taskSet.stageId, index)
+        TaskResultVerificationManager.addNewRunningTask(taskId.toInt, stageIndex)
         // Do various bookkeeping
         copiesRunning(index) += 1
         val attemptNum = taskAttempts(index).size
@@ -508,7 +512,7 @@ private[spark] class TaskSetManager(
         }.toMap
 
         sched.dagScheduler.taskStarted(task, info)
-        println(s"[TASK SET MANAGER] tid $taskId for task-index $index [stage ${taskSet.stageId}]")
+//        println(s"[TASK SET MANAGER] tid $taskId for task-index $index [stage ${taskSet.stageId}]")
         new TaskDescription(
           taskId,
           attemptNum,

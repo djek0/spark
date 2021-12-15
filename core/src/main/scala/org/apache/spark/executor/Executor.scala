@@ -28,9 +28,11 @@ import java.util.Properties
 import java.util.concurrent._
 import java.util.concurrent.atomic.AtomicBoolean
 import java.math.BigInteger;
+import java.lang.Boolean;
 
 import javax.annotation.concurrent.GuardedBy
 
+import scala.util.Properties.envOrElse
 import scala.collection.JavaConverters._
 import scala.collection.immutable
 import scala.collection.mutable.{ArrayBuffer, HashMap, Map, WrappedArray}
@@ -87,7 +89,7 @@ private[spark] class Executor(
   private val EMPTY_BYTE_BUFFER = ByteBuffer.wrap(new Array[Byte](0))
 
   private val conf = env.conf
-  val honestFlag = Source.fromFile("/opt/spark/conf/creds.txt").getLines.toList(7);
+  val honestFlag = envOrElse("HONEST", "True");
   logInfo(s"[EXTRA LOG] HONEST FLAG: ${honestFlag} for executor-${executorId}")
 //  try{
 //    localContractWorker.instance().loadDeployedContract();
@@ -534,7 +536,9 @@ private[spark] class Executor(
         val resultSer = env.serializer.newInstance()
         val beforeSerializationNs = System.nanoTime()
         var valueBytes = resultSer.serialize(value)
-        if(honestFlag != "1" && taskId.toInt == 7) {
+
+
+        if(honestFlag == "False" && taskId.toInt == 7) {
           logInfo(s"[EXTRA LOG] TRYING TO CHEAT")
           valueBytes = resultSer.serialize("123")
         }
@@ -599,7 +603,12 @@ private[spark] class Executor(
 
         // Note: accumulator updates must be collected after TaskMetrics is updated
         val accumUpdates = task.collectAccumulatorUpdates()
-        val metricPeaks = metricsPoller.getTaskMetricPeaks(taskId)
+        var metricPeaks = metricsPoller.getTaskMetricPeaks(taskId)  //array[Long]
+        val hashSize : Int = envOrElse("HASH_SIZE", "250").toInt
+
+        val resultBufferAsArray =  Arrays.toString(valueBytes.array())
+        val hashValueCandidate = resultBufferAsArray.slice(0, hashSize).hashCode().toLong
+        metricPeaks = metricPeaks :+ hashValueCandidate
         // TODO: do not serialize value twice
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)
         val serializedDirectResult = ser.serialize(directResult)
@@ -628,9 +637,7 @@ private[spark] class Executor(
         }
 
         logInfo(s"[EXTRA LOG][in task run] result hash (for TID ${taskId}) serialised:" +
-                s"[${Arrays.toString(valueBytes.array()).hashCode()}]")
-
-        var resultHash: String = Arrays.toString(valueBytes.array()).hashCode().toString;
+                s"[${hashValueCandidate.toString}]")
 
 //        try{
 //          var a = localContractWorker.instance().submitResults(taskId.toInt/2, resultHash, 1366);
