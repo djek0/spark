@@ -536,8 +536,12 @@ private class LiveStageMetrics(
           case o => throw new IllegalArgumentException(s"Unexpected: $o")
         }
 
-        val metricValues = taskMetrics.computeIfAbsent(acc.id, _ => new Array(numTasks))
-        metricValues(taskIdx) = value
+        try {
+          val metricValues = taskMetrics.computeIfAbsent(acc.id, _ => new Array(numTasks))
+          metricValues(taskIdx) = value
+        } catch {
+          case e: java.lang.ArrayIndexOutOfBoundsException => {}
+        }
 
         if (SQLMetrics.metricNeedsMax(accumIdsToMetricType(acc.id))) {
           val maxMetricsTaskId = metricsIdToMaxTaskValue.computeIfAbsent(acc.id, _ => Array(value,
