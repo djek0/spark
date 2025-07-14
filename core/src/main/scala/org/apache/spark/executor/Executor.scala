@@ -68,7 +68,6 @@ private[spark] class Executor(
     uncaughtExceptionHandler: UncaughtExceptionHandler = new SparkUncaughtExceptionHandler,
     resources: immutable.Map[String, ResourceInformation])
   extends Logging {
-
   logInfo(s"Starting executor ID $executorId on host $executorHostname")
 
   private val executorShutdown = new AtomicBoolean(false)
@@ -268,6 +267,7 @@ private[spark] class Executor(
     val tr = new TaskRunner(context, taskDescription, plugins)
     runningTasks.put(taskDescription.taskId, tr)
     threadPool.execute(tr)
+    println("GOT IN HERE")
     if (decommissioned) {
       log.error(s"Launching a task while in decommissioned state.")
     }
@@ -431,6 +431,9 @@ private[spark] class Executor(
     }
 
     override def run(): Unit = {
+      // Simple log to verify executor is running
+      logInfo(s"HELLO FROM EXECUTOR! Executor ID: $executorId, Task ID: $taskId")
+      
       setMDCForTask(taskName, mdcProperties)
       threadId = Thread.currentThread.getId
       Thread.currentThread.setName(threadName)
@@ -544,6 +547,9 @@ private[spark] class Executor(
         val valueBytes = resultSer.serialize(value)
         val afterSerializationNs = System.nanoTime()
 
+        logInfo(s"The value for task $taskName is: $value")
+
+
         // Deserialization happens in two parts: first, we deserialize a Task object, which
         // includes the Partition. Second, Task.run() deserializes the RDD and function to be run.
         task.metrics.setExecutorDeserializeTime(TimeUnit.NANOSECONDS.toMillis(
@@ -607,6 +613,12 @@ private[spark] class Executor(
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)
         val serializedDirectResult = ser.serialize(directResult)
         val resultSize = serializedDirectResult.limit()
+        logInfo("#########################")
+        logInfo(s"CHECK check CHECK directResult: $directResult + " +
+          s" serializedDirectResult: $serializedDirectResult +" +
+          s" resultSize: $resultSize")
+        logInfo("#########################")
+
 
         // directSend = sending directly back to the driver
         val serializedResult: ByteBuffer = {
@@ -628,6 +640,72 @@ private[spark] class Executor(
             serializedDirectResult
           }
         }
+
+        //  --- MY-INSERT ---
+        // write the output value to files in multiple locations
+        try {
+
+          logInfo(s"=== System Properties ===")
+          logInfo(s"User Home: ${System.getProperty("user.home")}")
+          logInfo(s"User Name: ${System.getProperty("user.name")}")
+          logInfo(s"Working Dir: ${new java.io.File(".").getAbsolutePath}")
+          logInfo(s"=== End System Properties ===")
+          // 1. Local executor directory (for Spark's internal use)
+          val localOutputDir = new File("spark-task-output")
+          // 2. User's home directory (for easy access)
+          val userHome = System.getProperty("user.home")
+          val homeOutputDir = new File(s"$userHome/spark-output")
+
+          // List of directories to write to
+          val outputDirs = List(localOutputDir, homeOutputDir)
+
+          // Write to each directory
+          outputDirs.foreach { dir =>
+            try {
+              // Log the directory we're trying to use
+              logInfo(s"Writing to directory: ${dir.getAbsolutePath}")
+
+              // Create directory if it doesn't exist
+              if (!dir.exists()) {
+                logInfo(s"Creating directory: ${dir.getAbsolutePath}")
+                if (!dir.mkdirs()) {
+                  logWarning(s"Failed to create directory: ${dir.getAbsolutePath}")
+                } else {
+                  logInfo(s"Successfully created directory: ${dir.getAbsolutePath}")
+                }
+              }
+
+              // Create file path
+              val outputFile = new File(dir, s"task-output-${taskId}.txt")
+              logInfo(s"Writing task output to: ${outputFile.getAbsolutePath}")
+
+              // Write to file
+              val writer = new java.io.PrintWriter(outputFile)
+              try {
+                writer.write(value.toString)
+                logInfo(s"Successfully wrote to: ${outputFile.getAbsolutePath}")
+                logInfo(s"File info - exists: ${outputFile.exists()}, size: ${outputFile.length()} bytes")
+              } finally {
+                writer.close()
+              }
+
+            } catch {
+              case e: Exception =>
+                logError(s"Failed to write to ${dir.getAbsolutePath} for task $taskId")
+                logError(s"Error: ${e.getMessage}")
+            }
+          }
+
+          logInfo("=== File Writing Summary ===")
+          logInfo(s"1. Local executor path: ${localOutputDir.getAbsolutePath}")
+          logInfo(s"2. Home directory path: ${homeOutputDir.getAbsolutePath}")
+          logInfo("===========================")
+
+        } catch {
+          case e: Exception =>
+            logError(s"Unexpected error in file writing process for task $taskId", e)
+        }
+        // --- END of MY-INSERT ---
 
         executorSource.SUCCEEDED_TASKS.inc(1L)
         setTaskFinishedAndClearInterruptStatus()
