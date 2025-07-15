@@ -68,7 +68,7 @@ private[spark] class Executor(
     uncaughtExceptionHandler: UncaughtExceptionHandler = new SparkUncaughtExceptionHandler,
     resources: immutable.Map[String, ResourceInformation])
   extends Logging {
-  logInfo(s"Starting executor ID $executorId on host $executorHostname")
+  logInfo(s"[EXTRA_lOG] Starting executor ID $executorId on host $executorHostname")
 
   private val executorShutdown = new AtomicBoolean(false)
   val stopHookReference = ShutdownHookManager.addShutdownHook(
@@ -432,7 +432,7 @@ private[spark] class Executor(
 
     override def run(): Unit = {
       // Simple log to verify executor is running
-      logInfo(s"HELLO FROM EXECUTOR! Executor ID: $executorId, Task ID: $taskId")
+      logInfo(s"[EXTRA_lOG] HELLO FROM EXECUTOR! Executor ID: $executorId, Task ID: $taskId")
       
       setMDCForTask(taskName, mdcProperties)
       threadId = Thread.currentThread.getId
@@ -547,7 +547,7 @@ private[spark] class Executor(
         val valueBytes = resultSer.serialize(value)
         val afterSerializationNs = System.nanoTime()
 
-        logInfo(s"The value for task $taskName is: $value")
+        logInfo(s"[EXTRA_lOG] The value for task $taskName is: $value")
 
 
         // Deserialization happens in two parts: first, we deserialize a Task object, which
@@ -613,11 +613,11 @@ private[spark] class Executor(
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)
         val serializedDirectResult = ser.serialize(directResult)
         val resultSize = serializedDirectResult.limit()
-        logInfo("#########################")
-        logInfo(s"CHECK check CHECK directResult: $directResult + " +
+        logInfo("[EXTRA_lOG] #########################")
+        logInfo(s"[EXTRA_lOG]CHECK check CHECK directResult: $directResult + " +
           s" serializedDirectResult: $serializedDirectResult +" +
           s" resultSize: $resultSize")
-        logInfo("#########################")
+        logInfo("[EXTRA_lOG] #########################")
 
 
         // directSend = sending directly back to the driver
@@ -645,11 +645,11 @@ private[spark] class Executor(
         // write the output value to files in multiple locations
         try {
 
-          logInfo(s"=== System Properties ===")
-          logInfo(s"User Home: ${System.getProperty("user.home")}")
-          logInfo(s"User Name: ${System.getProperty("user.name")}")
-          logInfo(s"Working Dir: ${new java.io.File(".").getAbsolutePath}")
-          logInfo(s"=== End System Properties ===")
+          logInfo(s"[EXTRA_lOG] === System Properties ===")
+          logInfo(s"[EXTRA_lOG] User Home: ${System.getProperty("user.home")}")
+          logInfo(s"[EXTRA_lOG] User Name: ${System.getProperty("user.name")}")
+          logInfo(s"[EXTRA_lOG] Working Dir: ${new java.io.File(".").getAbsolutePath}")
+          logInfo(s"[EXTRA_lOG] === End System Properties ===")
           // 1. Local executor directory (for Spark's internal use)
           val localOutputDir = new File("spark-task-output")
           // 2. User's home directory (for easy access)
@@ -663,28 +663,28 @@ private[spark] class Executor(
           outputDirs.foreach { dir =>
             try {
               // Log the directory we're trying to use
-              logInfo(s"Writing to directory: ${dir.getAbsolutePath}")
+              logInfo(s"[EXTRA_lOG] Writing to directory: ${dir.getAbsolutePath}")
 
               // Create directory if it doesn't exist
               if (!dir.exists()) {
-                logInfo(s"Creating directory: ${dir.getAbsolutePath}")
+                logInfo(s"[EXTRA_lOG] Creating directory: ${dir.getAbsolutePath}")
                 if (!dir.mkdirs()) {
-                  logWarning(s"Failed to create directory: ${dir.getAbsolutePath}")
+                  logWarning(s"[EXTRA_lOG] Failed to create directory: ${dir.getAbsolutePath}")
                 } else {
-                  logInfo(s"Successfully created directory: ${dir.getAbsolutePath}")
+                  logInfo(s"[EXTRA_lOG] Successfully created directory: ${dir.getAbsolutePath}")
                 }
               }
 
               // Create file path
               val outputFile = new File(dir, s"task-output-${taskId}.txt")
-              logInfo(s"Writing task output to: ${outputFile.getAbsolutePath}")
+              logInfo(s"[EXTRA_lOG] Writing task output to: ${outputFile.getAbsolutePath}")
 
               // Write to file
               val writer = new java.io.PrintWriter(outputFile)
               try {
                 writer.write(value.toString)
-                logInfo(s"Successfully wrote to: ${outputFile.getAbsolutePath}")
-                logInfo(s"File info - exists: ${outputFile.exists()}, size: ${outputFile.length()} bytes")
+                logInfo(s"[EXTRA_lOG] Successfully wrote to: ${outputFile.getAbsolutePath}")
+                logInfo(s"[EXTRA_lOG] File info - exists: ${outputFile.exists()}, size: ${outputFile.length()} bytes")
               } finally {
                 writer.close()
               }
@@ -696,10 +696,10 @@ private[spark] class Executor(
             }
           }
 
-          logInfo("=== File Writing Summary ===")
-          logInfo(s"1. Local executor path: ${localOutputDir.getAbsolutePath}")
-          logInfo(s"2. Home directory path: ${homeOutputDir.getAbsolutePath}")
-          logInfo("===========================")
+          logInfo("[EXTRA_lOG] === File Writing Summary ===")
+          logInfo(s"[EXTRA_lOG] 1. Local executor path: ${localOutputDir.getAbsolutePath}")
+          logInfo(s"[EXTRA_lOG] 2. Home directory path: ${homeOutputDir.getAbsolutePath}")
+          logInfo("[EXTRA_lOG] ===========================")
 
         } catch {
           case e: Exception =>
