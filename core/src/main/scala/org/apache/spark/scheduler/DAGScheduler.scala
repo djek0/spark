@@ -1305,15 +1305,18 @@ private[spark] class DAGScheduler(
 
     val tasks: Seq[Task[_]] = try {
       val serializedTaskMetrics = closureSerializer.serialize(stage.latestInfo.taskMetrics).array()
+      logInfo(s"[TASK CREATION] Starting task creation for stage ${stage.id}, partitions: ${partitionsToCompute}")
       stage match {
         case stage: ShuffleMapStage =>
+          logInfo(s"[TASK CREATION] Processing ShuffleMapStage ${stage.id}")
           stage.pendingPartitions.clear()
           partitionsToCompute.flatMap { id =>
             val locs = taskIdToLocations(id)
             val part = partitions(id)
             logInfo(s"[EXTRA LOG] prefered locations: ${locs}")
-            //logInfo(s"[EXTRA LOG] creating new ShuffleMapTask")
+            logInfo(s"[TASK CREATION] Creating 2 ShuffleMapTasks for partition ${id}")
             stage.pendingPartitions += id
+            // Create 2 tasks for the same partition (both work on same data)
             Seq[Task[_]](
               new ShuffleMapTask(stage.id, stage.latestInfo.attemptNumber,
                 taskBinary, part, locs, properties, serializedTaskMetrics, Option(jobId),
@@ -1325,12 +1328,14 @@ private[spark] class DAGScheduler(
             )
           }
         case stage: ResultStage =>
+          logInfo(s"[TASK CREATION] Processing ResultStage ${stage.id}")
           partitionsToCompute.flatMap { id =>
             val p: Int = stage.partitions(id)
             val part = partitions(p)
             val locs = taskIdToLocations(id)
             logInfo(s"[EXTRA LOG] prefered locations: ${locs}")
-            //logInfo(s"[EXTRA LOG] creating new ResultTask")
+            logInfo(s"[TASK CREATION] Creating 2 ResultTasks for partition ${id}")
+            // Create 2 tasks for the same partition (both work on same data)
             Seq[Task[_]](   
               new ResultTask(stage.id, stage.latestInfo.attemptNumber,
                 taskBinary, part, locs, id, properties, serializedTaskMetrics,
@@ -1354,7 +1359,7 @@ private[spark] class DAGScheduler(
     if (tasks.nonEmpty) {
       logInfo(s"Submitting ${tasks.size} missing tasks from $stage (${stage.rdd}) (first 15 " +
         s"tasks are for partitions ${tasks.take(15).map(_.partitionId)})")
-     // logInfo(s"[EXTRA LOG] Submitting Tasks to taskScheduler. (line ~1279)")
+      logInfo(s"[TASK CREATION] ✅ TOTAL TASKS CREATED: ${tasks.size} for ${partitionsToCompute.size} partitions")
       
       taskScheduler.submitTasks(new TaskSet(
         tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties))
@@ -1562,8 +1567,10 @@ private[spark] class DAGScheduler(
     }
 
     this.synchronized {
+      println(s"[DAG BATCHING] Processing task completion: stageId=${stageId}, taskIndex=${taskIndex}, partitionId=${taskIndex/2}")
       if (unpostedTaskEndEvent.contains(stageId)) {
         if (unpostedTaskEndEvent(stageId).contains(taskIndex / 2)) {
+          println(s"[DAG BATCHING] ✅ BOTH REPLICAS DONE: Posting both events for partition ${taskIndex/2}")
           if(taskIndex % 2 == 0){
             postTaskEnd(unpostedTaskEndEvent(stageId)(taskIndex / 2))
             postTaskEnd(event)
@@ -1576,10 +1583,12 @@ private[spark] class DAGScheduler(
           }
         }
         else {
+          println(s"[DAG BATCHING] ⏳ FIRST REPLICA: Storing event for partition ${taskIndex/2}, waiting for partner")
           unpostedTaskEndEvent(stageId)(taskIndex / 2) = event
         }
       }
       else {
+        println(s"[DAG BATCHING] ⏳ FIRST STAGE COMPLETION: Creating storage for stage ${stageId}, partition ${taskIndex/2}")
         unpostedTaskEndEvent(stageId) = HashMap(taskIndex / 2 -> event)
       }
     }

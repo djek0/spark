@@ -79,8 +79,12 @@ private[spark] class TaskSetManager(
 
 
   val tasks = taskSet.tasks
+  // Support multiple tasks per partition for replication
   private[scheduler] val partitionToIndex = tasks.zipWithIndex
-    .map { case (t, idx) => t.partitionId -> idx }.toMap
+    .groupBy { case (t, idx) => t.partitionId }
+    .mapValues(_.map(_._2).toArray)
+  // For compatibility, keep a simple mapping to first task index per partition
+  private[scheduler] val partitionToFirstIndex = partitionToIndex.mapValues(_.head)
   val numTasks = tasks.length
   val copiesRunning = new Array[Int](numTasks)
 
@@ -213,6 +217,7 @@ private[spark] class TaskSetManager(
   private def addPendingTasks(): Unit = {
     val (_, duration) = Utils.timeTakenMs {
       for (i <- (0 until numTasks).reverse) {
+        logInfo(s"[PENDING TASKS] Adding task index=${i}, partitionId=${tasks(i).partitionId} to pending lists")
         addPendingTask(i, resolveRacks = false)
       }
       // Resolve the rack for each host. This can be slow, so de-dupe the list of hosts,
@@ -320,6 +325,9 @@ private[spark] class TaskSetManager(
           if (copiesRunning(index) == 0) {
             return Some(index)
           } else if (speculative && copiesRunning(index) == 1) {
+            return Some(index)
+          } else if (!speculative && copiesRunning(index) == 1) {
+            // Allow second replica for task replication (non-speculative)
             return Some(index)
           }
         }
@@ -451,13 +459,18 @@ private[spark] class TaskSetManager(
         // Found a task; do some bookkeeping and return a task description
         val task = tasks(index)
         val taskId = sched.newTaskId()
+        logInfo(s"[TASK SCHEDULING] Dequeued task with index=${index}, taskId=${taskId}, partitionId=${task.partitionId}")
         if (taskIndexToHost.contains(taskSet.stageId)) {
           taskIndexToHost(taskSet.stageId).put(index.toLong,host)
         } else{
           taskIndexToHost.put(taskSet.stageId,HashMap(index.toLong -> host))
         }
 
-        val stageIndex = (taskSet.stageId, index)
+        // Use taskId for consecutive indexing instead of array index
+        // This ensures even/odd pairing: taskId 0,1,2,3... maps to verification indices 0,1,2,3...
+        val verificationIndex = taskId.toInt
+        val stageIndex = (taskSet.stageId, verificationIndex)
+        logInfo(s"[VERIFICATION REGISTER] Registering taskId=${taskId} with stageIndex=${stageIndex} (array index=${index})")
         TaskResultVerificationManager.addNewRunningTask(taskId.toInt, stageIndex)
         // Do various bookkeeping
         copiesRunning(index) += 1
@@ -799,15 +812,18 @@ private[spark] class TaskSetManager(
   }
 
   private[scheduler] def markPartitionCompleted(partitionId: Int): Unit = {
-    partitionToIndex.get(partitionId).foreach { index =>
-      if (!successful(index)) {
-        tasksSuccessful += 1
-        successful(index) = true
-        if (tasksSuccessful == numTasks) {
-          isZombie = true
+    partitionToIndex.get(partitionId).foreach { indices =>
+      // Mark all replica tasks for this partition as successful
+      indices.foreach { index =>
+        if (!successful(index)) {
+          tasksSuccessful += 1
+          successful(index) = true
         }
-        maybeFinishTaskSet()
       }
+      if (tasksSuccessful == numTasks) {
+        isZombie = true
+      }
+      maybeFinishTaskSet()
     }
   }
 

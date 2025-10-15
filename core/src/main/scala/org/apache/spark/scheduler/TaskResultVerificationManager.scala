@@ -10,49 +10,63 @@ object TaskResultVerificationManager{
 
   def addNewRunningTask(tid: Int, indexStage: (Int, Int)): Unit = {
     if(tidToStageIndexInfo.contains(tid)){
-      //      println(s"${tid} already added to running tasks")
+      println(s"[VERIFICATION] ${tid} already added to running tasks")
       return
     }
-    //    println(s"added ${tid} to verification manager")
+    println(s"[VERIFICATION] added ${tid} to verification manager with stage ${indexStage}")
     tidToStageIndexInfo(tid) = indexStage
   }
 
   def addNewResultForTid(tid: Long, resultHash: String): Unit = {
     if(tidToStageIndexInfo.contains(tid)){
-      //      println(s"adding task ${tid} to verification manager")
+      println(s"[VERIFICATION] adding result for task ${tid} to verification manager")
       val stageIndex = tidToStageIndexInfo(tid)
       stageIndexToResultHash(stageIndex) = resultHash
+      println(s"[VERIFICATION] stored hash ${resultHash} for stage ${stageIndex}")
+    } else {
+      println(s"[VERIFICATION] ERROR: task ${tid} not found in running tasks!")
     }
   }
 
   def verifyResult(tid: Long): Unit = {
-    //    println(s"Trying to verify result ${tid}")
+    println(s"[VERIFICATION] Trying to verify result for task ${tid}")
     if(tidToStageIndexInfo.contains(tid)) {
       val stageIndex = tidToStageIndexInfo(tid)
       if(stageIndexToResultHash.contains(stageIndex)){
         val stageId = stageIndex._1
         val index = stageIndex._2
+        println(s"[VERIFICATION] Verifying task ${tid} with stage ${stageId}, index ${index}")
         if(index%2 == 0){
-          if(stageIndexToResultHash.contains((stageId, index+1))){
-            if(stageIndexToResultHash(stageIndex)==stageIndexToResultHash((stageId,index+1))){
-              //              println(s"Valid result for task refering to stage ${stageId}, indexes ${index}, ${index+1}")
+          val partnerIndex = index + 1
+          if(stageIndexToResultHash.contains((stageId, partnerIndex))){
+            if(stageIndexToResultHash(stageIndex)==stageIndexToResultHash((stageId,partnerIndex))){
+              println(s"[VERIFICATION] ✅ CONSENSUS: Valid result for stage ${stageId}, indexes ${index}, ${partnerIndex}")
             }
             else{
-              //              println(s"BAD result for task refering to stage ${stageId}, indexes ${index}, ${index+1}")
+              println(s"[VERIFICATION] ❌ BYZANTINE FAULT: BAD result for stage ${stageId}, indexes ${index}, ${partnerIndex}")
             }
+          } else {
+            println(s"[VERIFICATION] ⏳ WAITING: Partner task ${partnerIndex} not completed yet")
           }
         }
         else{
-          if(stageIndexToResultHash.contains((stageId, index-1))){
-            if(stageIndexToResultHash(stageIndex)==stageIndexToResultHash((stageId,index-1))){
-              //              println(s"Valid result for task refering to stage ${stageId}, indexes ${index}, ${index-1}")
+          val partnerIndex = index - 1
+          if(stageIndexToResultHash.contains((stageId, partnerIndex))){
+            if(stageIndexToResultHash(stageIndex)==stageIndexToResultHash((stageId,partnerIndex))){
+              println(s"[VERIFICATION] ✅ CONSENSUS: Valid result for stage ${stageId}, indexes ${index}, ${partnerIndex}")
             }
             else{
-              //              println(s"BAD result for task refering to stage ${stageId}, indexes ${index}, ${index-1}")
+              println(s"[VERIFICATION] ❌ BYZANTINE FAULT: BAD result for stage ${stageId}, indexes ${index}, ${partnerIndex}")
             }
+          } else {
+            println(s"[VERIFICATION] ⏳ WAITING: Partner task ${partnerIndex} not completed yet")
           }
         }
+      } else {
+        println(s"[VERIFICATION] ⏳ WAITING: No result hash stored for task ${tid} yet")
       }
+    } else {
+      println(s"[VERIFICATION] ERROR: Task ${tid} not found in running tasks!")
     }
   }
 
