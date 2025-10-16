@@ -133,6 +133,7 @@ private[spark] class Executor(
     }
 
   if (!isLocal) {
+    conf.get("spark.app.name")
     env.blockManager.initialize(conf.getAppId)
     env.metricsSystem.registerSource(executorSource)
     env.metricsSystem.registerSource(new JVMCPUSource())
@@ -267,7 +268,6 @@ private[spark] class Executor(
     val tr = new TaskRunner(context, taskDescription, plugins)
     runningTasks.put(taskDescription.taskId, tr)
     threadPool.execute(tr)
-    println("GOT IN HERE")
     if (decommissioned) {
       log.error(s"Launching a task while in decommissioned state.")
     }
@@ -487,6 +487,9 @@ private[spark] class Executor(
         metricsPoller.onTaskStart(taskId, task.stageId, task.stageAttemptId)
         taskStarted = true
 
+
+
+
         // Run the actual task and measure its runtime.
         taskStartTimeNs = System.nanoTime()
         taskStartCpu = if (threadMXBean.isCurrentThreadCpuTimeSupported) {
@@ -501,6 +504,16 @@ private[spark] class Executor(
             resources = taskDescription.resources,
             plugins = plugins)
           threwException = false
+
+          logInfo(s"[EXTRA_lOG] ==========================================")
+          logInfo(s"[EXTRA_lOG] The result for task $taskName is res: $res")
+          logInfo(s"[EXTRA_lOG] The result for task $taskName is res: ${res match {
+            case a: Array[_] => a.mkString("Array(", ", ", ")")
+            case x => x.toString
+          }}")
+          logInfo(s"[EXTRA_lOG] ==========================================")
+
+
           res
         } {
           val releasedLocks = env.blockManager.releaseAllLocksForTask(taskId)
@@ -547,7 +560,14 @@ private[spark] class Executor(
         val valueBytes = resultSer.serialize(value)
         val afterSerializationNs = System.nanoTime()
 
-        logInfo(s"[EXTRA_lOG] The value for task $taskName is: $value")
+        logInfo(s"[EXTRA_lOG] ==========================================")
+        logInfo(s"[EXTRA_lOG] The value for task $taskName is: $value.")
+        logInfo(s"[EXTRA_lOG] The value for task $taskName is val: ${value match {
+          case a: Array[_] => a.mkString("Array(", ", ", ")")
+          case x => x.toString
+        }}")
+        logInfo(s"[EXTRA_lOG] ==========================================")
+
 
 
         // Deserialization happens in two parts: first, we deserialize a Task object, which
@@ -641,71 +661,22 @@ private[spark] class Executor(
           }
         }
 
-        //  --- MY-INSERT ---
-        // write the output value to files in multiple locations
+
         try {
-
-          logInfo(s"[EXTRA_lOG] === System Properties ===")
-          logInfo(s"[EXTRA_lOG] User Home: ${System.getProperty("user.home")}")
-          logInfo(s"[EXTRA_lOG] User Name: ${System.getProperty("user.name")}")
-          logInfo(s"[EXTRA_lOG] Working Dir: ${new java.io.File(".").getAbsolutePath}")
-          logInfo(s"[EXTRA_lOG] === End System Properties ===")
-          // 1. Local executor directory (for Spark's internal use)
-          val localOutputDir = new File("spark-task-output")
-          // 2. User's home directory (for easy access)
-          val userHome = System.getProperty("user.home")
-          val homeOutputDir = new File(s"$userHome/spark-output")
-
-          // List of directories to write to
-          val outputDirs = List(localOutputDir, homeOutputDir)
-
-          // Write to each directory
-          outputDirs.foreach { dir =>
-            try {
-              // Log the directory we're trying to use
-              logInfo(s"[EXTRA_lOG] Writing to directory: ${dir.getAbsolutePath}")
-
-              // Create directory if it doesn't exist
-              if (!dir.exists()) {
-                logInfo(s"[EXTRA_lOG] Creating directory: ${dir.getAbsolutePath}")
-                if (!dir.mkdirs()) {
-                  logWarning(s"[EXTRA_lOG] Failed to create directory: ${dir.getAbsolutePath}")
-                } else {
-                  logInfo(s"[EXTRA_lOG] Successfully created directory: ${dir.getAbsolutePath}")
-                }
-              }
-
-              // Create file path
-              val outputFile = new File(dir, s"task-output-${taskId}.txt")
-              logInfo(s"[EXTRA_lOG] Writing task output to: ${outputFile.getAbsolutePath}")
-
-              // Write to file
-              val writer = new java.io.PrintWriter(outputFile)
-              try {
-                writer.write(value.toString)
-                logInfo(s"[EXTRA_lOG] Successfully wrote to: ${outputFile.getAbsolutePath}")
-                logInfo(s"[EXTRA_lOG] File info - exists: ${outputFile.exists()}, size: ${outputFile.length()} bytes")
-              } finally {
-                writer.close()
-              }
-
-            } catch {
-              case e: Exception =>
-                logError(s"Failed to write to ${dir.getAbsolutePath} for task $taskId")
-                logError(s"Error: ${e.getMessage}")
+          logInfo(s"[EXTRA_lOG] <3<3<3")
+          logInfo(s"[EXTRA_lOG] The value for task $taskName is: $value.")
+          logInfo(s"[EXTRA_lOG] The value for task $taskName is val: ${
+            value match {
+              case a: Array[_] => a.mkString("Array(", ", ", ")")
+              case x => x.toString
             }
-          }
-
-          logInfo("[EXTRA_lOG] === File Writing Summary ===")
-          logInfo(s"[EXTRA_lOG] 1. Local executor path: ${localOutputDir.getAbsolutePath}")
-          logInfo(s"[EXTRA_lOG] 2. Home directory path: ${homeOutputDir.getAbsolutePath}")
-          logInfo("[EXTRA_lOG] ===========================")
-
+          }")
+          logInfo(s"[EXTRA_lOG] <3<3<3")
         } catch {
           case e: Exception =>
-            logError(s"Unexpected error in file writing process for task $taskId", e)
+            logError(s"Unexpected error in value printing process for task $taskId", e)
         }
-        // --- END of MY-INSERT ---
+
 
         executorSource.SUCCEEDED_TASKS.inc(1L)
         setTaskFinishedAndClearInterruptStatus()

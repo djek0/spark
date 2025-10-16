@@ -17,14 +17,14 @@
 
 package org.apache.spark.scheduler
 
-import java.io._
 import java.lang.management.ManagementFactory
 import java.nio.ByteBuffer
 import java.util.Properties
-
 import org.apache.spark._
 import org.apache.spark.broadcast.Broadcast
-import org.apache.spark.rdd.RDD
+import org.apache.spark.internal.Logging
+import org.apache.spark.rdd.{RDD, Trace}
+
 
 /**
  * A task that sends back the output to the driver application.
@@ -66,32 +66,43 @@ private[spark] class ResultTask[T, U](
     isBarrier: Boolean = false)
   extends Task[U](stageId, stageAttemptId, partition.index, localProperties, serializedTaskMetrics,
     jobId, appId, appAttemptId, isBarrier)
-  with Serializable {
+  with Serializable with Logging {
 
-  @transient private[this] val preferredLocs: Seq[TaskLocation] = {
+  @transient private[this] val preferredLocs: Seq[TaskLocation] =
     if (locs == null) Nil else locs.distinct
-  }
 
   override def runTask(context: TaskContext): U = {
-    // Deserialize the RDD and the func using the broadcast variables.
+    // ----- deserialize (unchanged) -----
     val threadMXBean = ManagementFactory.getThreadMXBean
     val deserializeStartTimeNs = System.nanoTime()
-    val deserializeStartCpuTime = if (threadMXBean.isCurrentThreadCpuTimeSupported) {
-      threadMXBean.getCurrentThreadCpuTime
-    } else 0L
-    val ser = SparkEnv.get.closureSerializer.newInstance()
-    val (rdd, func) = ser.deserialize[(RDD[T], (TaskContext, Iterator[T]) => U)](
-      ByteBuffer.wrap(taskBinary.value), Thread.currentThread.getContextClassLoader)
-    _executorDeserializeTimeNs = System.nanoTime() - deserializeStartTimeNs
-    _executorDeserializeCpuTime = if (threadMXBean.isCurrentThreadCpuTimeSupported) {
-      threadMXBean.getCurrentThreadCpuTime - deserializeStartCpuTime
-    } else 0L
+    val deserializeStartCpuTime =
+      if (threadMXBean.isCurrentThreadCpuTimeSupported) threadMXBean.getCurrentThreadCpuTime else 0L
 
-    func(context, rdd.iterator(partition, context))
+    val ser = SparkEnv.get.closureSerializer.newInstance()
+    val (rdd, func) =
+      ser.deserialize[(RDD[T], (TaskContext, Iterator[T]) => U)](
+        ByteBuffer.wrap(taskBinary.value),
+        Thread.currentThread.getContextClassLoader
+      )
+
+    _executorDeserializeTimeNs = System.nanoTime() - deserializeStartTimeNs
+    _executorDeserializeCpuTime =
+      if (threadMXBean.isCurrentThreadCpuTimeSupported)
+        threadMXBean.getCurrentThreadCpuTime - deserializeStartCpuTime
+      else 0L
+
+    // ----- get the iterator and run the user action -----
+    val it0 = rdd.iterator(partition, context)
+    val result = func(context, it0)
+
+    // Commit logs at the end of the task
+    Trace.commitAllLogs()
+
+    result
   }
 
   // This is only callable on the driver side.
   override def preferredLocations: Seq[TaskLocation] = preferredLocs
 
-  override def toString: String = "ResultTask(" + stageId + ", " + partitionId + ")"
+  override def toString: String = s"ResultTask($stageId, $partitionId)"
 }

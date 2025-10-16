@@ -41,15 +41,49 @@ private[spark] class MapPartitionsRDD[U: ClassTag, T: ClassTag](
     f: (TaskContext, Int, Iterator[T]) => Iterator[U],  // (TaskContext, partition index, iterator)
     preservesPartitioning: Boolean = false,
     isFromBarrier: Boolean = false,
-    isOrderSensitive: Boolean = false)
+    isOrderSensitive: Boolean = false,
+    isFilterOperation: Boolean = false,
+    isExpanderOperation: Boolean = false)  // For flatMap, flatMapValues (1→M)
   extends RDD[U](prev) {
 
   override val partitioner = if (preservesPartitioning) firstParent[T].partitioner else None
 
   override def getPartitions: Array[Partition] = firstParent[T].partitions
 
-  override def compute(split: Partition, context: TaskContext): Iterator[U] =
-    f(context, split.index, firstParent[T].iterator(split, context))
+  override def compute(split: Partition, context: TaskContext): Iterator[U] = {
+    val inputIter = firstParent[T].iterator(split, context)
+    
+    // Handle different transformation categories with UID tracking
+    if (isFilterOperation) {
+      // Category 1: 1→0/1 (Droppers) - filter operations
+      // Dequeue UID per input; requeue only if kept
+      inputIter.flatMap { value =>
+        val currentUid = Trace.dequeueUid()
+        val result = f(context, split.index, Iterator(value))
+        if (result.hasNext) {
+          Trace.enqueueUid(currentUid)
+          Some(result.next())
+        } else {
+          None
+        }
+      }
+    } else if (isExpanderOperation) {
+      // Category 2: 1→M (Expanders) - flatMap, flatMapValues operations  
+      // Each output element gets the same UID from its input (group-based semantics, lazy)
+      inputIter.flatMap { value =>
+        val currentUid = Trace.dequeueUid()
+        val result = f(context, split.index, Iterator(value))
+        result.map { element =>
+          Trace.enqueueUid(currentUid)  // Enqueue UID for each output element lazily
+          element
+        }
+      }
+    } else {
+      // Category 3: 1→1 (Safe Pass-through) - map, mapValues, keyBy
+      // No UID queue changes needed - just pass through
+      f(context, split.index, inputIter)
+    }
+  }
 
   override def clearDependencies(): Unit = {
     super.clearDependencies()
@@ -57,7 +91,7 @@ private[spark] class MapPartitionsRDD[U: ClassTag, T: ClassTag](
   }
 
   @transient protected lazy override val isBarrier_ : Boolean =
-    isFromBarrier || dependencies.exists(_.rdd.isBarrier())
+    dependencies.exists(_.rdd.isBarrier())
 
   override protected def getOutputDeterministicLevel = {
     if (isOrderSensitive && prev.outputDeterministicLevel == DeterministicLevel.UNORDERED) {

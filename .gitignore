@@ -48,6 +48,9 @@ dev/create-release/*final
 dev/create-release/*txt
 dev/pr-deps/
 dist/
+# Ignore task logging output directories
+spark-trace/
+core/spark-task-output/
 docs/_site/
 docs/api
 docs/.local_ruby_bundle

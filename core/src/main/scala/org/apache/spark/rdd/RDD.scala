@@ -18,20 +18,17 @@
 package org.apache.spark.rdd
 
 import java.util.Random
-
-import scala.collection.{mutable, Map}
+import scala.collection.{Map, mutable}
 import scala.collection.mutable.ArrayBuffer
 import scala.io.Codec
 import scala.language.implicitConversions
 import scala.ref.WeakReference
-import scala.reflect.{classTag, ClassTag}
+import scala.reflect.{ClassTag, classTag}
 import scala.util.hashing
-
 import com.clearspring.analytics.stream.cardinality.HyperLogLogPlus
 import org.apache.hadoop.io.{BytesWritable, NullWritable, Text}
 import org.apache.hadoop.io.compress.CompressionCodec
 import org.apache.hadoop.mapred.TextOutputFormat
-
 import org.apache.spark._
 import org.apache.spark.Partitioner._
 import org.apache.spark.annotation.{DeveloperApi, Experimental, Since}
@@ -40,6 +37,7 @@ import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.RDD_LIMIT_SCALE_UP_FACTOR
+import org.apache.spark.TaskContext
 import org.apache.spark.partial.BoundedDouble
 import org.apache.spark.partial.CountEvaluator
 import org.apache.spark.partial.GroupedCountEvaluator
@@ -47,10 +45,9 @@ import org.apache.spark.partial.PartialResult
 import org.apache.spark.resource.ResourceProfile
 import org.apache.spark.storage.{RDDBlockId, StorageLevel}
 import org.apache.spark.util.{BoundedPriorityQueue, Utils}
-import org.apache.spark.util.collection.{ExternalAppendOnlyMap, OpenHashMap,
-  Utils => collectionUtils}
-import org.apache.spark.util.random.{BernoulliCellSampler, BernoulliSampler, PoissonSampler,
-  SamplingUtils}
+import org.apache.spark.util.collection.{ExternalAppendOnlyMap, OpenHashMap, Utils => collectionUtils}
+import org.apache.spark.util.random.{BernoulliCellSampler, BernoulliSampler, PoissonSampler, SamplingUtils}
+
 
 /**
  * A Resilient Distributed Dataset (RDD), the basic abstraction in Spark. Represents an immutable,
@@ -262,6 +259,17 @@ abstract class RDD[T: ClassTag](
   }
 
   /**
+   * Check if this RDD is a collapser that breaks per-element UID tracking.
+   * Collapsers change element count/structure and should be excluded from UID tracking.
+   */
+  private def isCollapserRDD: Boolean = {
+    this.getClass.getSimpleName match {
+      case "CoalescedRDD" | "ShuffledRDD" | "UnionRDD" | "CartesianRDD" => true
+      case _ => false
+    }
+  }
+
+  /**
    * Get the list of dependencies of this RDD ignoring checkpointing.
    */
   final private def internalDependencies: Option[Seq[Dependency[_]]] = {
@@ -323,10 +331,46 @@ abstract class RDD[T: ClassTag](
    * subclasses of RDD.
    */
   final def iterator(split: Partition, context: TaskContext): Iterator[T] = {
-    if (storageLevel != StorageLevel.NONE) {
-      getOrCompute(split, context)
-    } else {
-      computeOrReadCheckpoint(split, context)
+    val isOutermost = Trace.enterIter()
+    try {
+      val it = if (storageLevel != StorageLevel.NONE) {
+        getOrCompute(split, context)
+      } else {
+        computeOrReadCheckpoint(split, context)
+      }
+      // Get app name safely from SparkEnv
+      val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
+      println("appName: " + appName)
+      if (isOutermost && !isCollapserRDD) {
+        // Open finals writer (one per task), auto-close on completion
+        val outWriter = Trace.createOutputWriter(
+          stageId = context.stageId,
+          partitionId = split.index,
+          attempt = context.attemptNumber,
+          taskId = context.taskAttemptId(),
+          appName = appName
+        )
+        Option(context).foreach { ctx =>
+          ctx.addTaskCompletionListener[Unit](_ => try outWriter.safeClose() catch { case _: Throwable => () })
+        }
+
+        // Wrap the FINAL iterator so every pulled element is logged once
+        it.map { elem =>
+          Trace.logOutput(
+            writer = outWriter,
+            stageId = context.stageId,
+            partitionId = split.index,
+            taskId = context.taskAttemptId(),
+            attempt = context.attemptNumber,
+            value = elem
+          )
+          elem
+        }
+      } else {
+        it
+      }
+    } finally {
+      Trace.exitIter()
     }
   }
 
@@ -357,12 +401,53 @@ abstract class RDD[T: ClassTag](
   /**
    * Compute an RDD partition or read it from a checkpoint if the RDD is checkpointing.
    */
-  private[spark] def computeOrReadCheckpoint(split: Partition, context: TaskContext): Iterator[T] =
-  {
+  private[spark] def computeOrReadCheckpoint(split: Partition, context: TaskContext): Iterator[T] = {
     if (isCheckpointedAndMaterialized) {
       firstParent[T].iterator(split, context)
     } else {
-      compute(split, context)
+      val baseIter = compute(split, context)
+      
+      // Check if this is a stage root (either no dependencies or all dependencies are ShuffleDependencies)
+      val isStageRoot = dependencies.isEmpty ||
+        dependencies.forall(_.isInstanceOf[ShuffleDependency[_, _, _]])
+
+      if (isStageRoot) {
+        // Initialize UID tracking for this stage
+        Trace.initForTask()
+
+        // Get app name safely from SparkEnv
+        val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
+        // Create input writer
+        val inputWriter = Trace.createInputWriter(
+          stageId = context.stageId,
+          partitionId = split.index,
+          attempt = context.attemptNumber,
+          taskId = context.taskAttemptId(),
+          appName = appName
+        )
+        Option(context).foreach { ctx =>
+          ctx.addTaskCompletionListener[Unit](_ => try {
+            inputWriter.safeClose()
+            Trace.commitLogs(inputWriter)
+          } catch { case _: Throwable => () })
+        }
+
+        // Log inputs
+        baseIter.map { value =>
+          // Log input with UID for each element
+          Trace.logInput(
+            inputWriter,
+            context.stageId,
+            split.index,
+            context.taskAttemptId(),
+            context.attemptNumber,
+            value
+          )
+          value // Return the original value unchanged
+        }
+      } else {
+        baseIter
+      }
     }
   }
 
@@ -421,7 +506,10 @@ abstract class RDD[T: ClassTag](
    */
   def flatMap[U: ClassTag](f: T => TraversableOnce[U]): RDD[U] = withScope {
     val cleanF = sc.clean(f)
-    new MapPartitionsRDD[U, T](this, (_, _, iter) => iter.flatMap(cleanF))
+    new MapPartitionsRDD[U, T](
+      this, 
+      (_, _, iter) => iter.flatMap(cleanF),
+      isExpanderOperation = true)  // Mark as expander operation for UID tracking
   }
 
   /**
@@ -432,7 +520,8 @@ abstract class RDD[T: ClassTag](
     new MapPartitionsRDD[T, T](
       this,
       (_, _, iter) => iter.filter(cleanF),
-      preservesPartitioning = true)
+      preservesPartitioning = true,
+      isFilterOperation = true)
   }
 
   /**
@@ -591,10 +680,24 @@ abstract class RDD[T: ClassTag](
    * @return A random sub-sample of the RDD without replacement.
    */
   private[spark] def randomSampleWithRange(lb: Double, ub: Double, seed: Long): RDD[T] = {
-    this.mapPartitionsWithIndex( { (index, partition) =>
+    this.mapPartitionsWithIndex( { (index: Int, partition: Iterator[T]) =>
       val sampler = new BernoulliCellSampler[T](lb, ub)
       sampler.setSeed(seed + index)
-      sampler.sample(partition)
+      
+      // Implement UID tracking for range sampling operations
+      partition.flatMap { value =>
+        val currentUid = Trace.dequeueUid()
+        val sampleCount = sampler.sample()
+        
+        if (sampleCount > 0) {
+          // Element selected - preserve original UID
+          Trace.enqueueUid(currentUid)
+          Some(value)
+        } else {
+          // Element not selected - UID is discarded (not re-enqueued)
+          None
+        }
+      }
     }, isOrderSensitive = true, preservesPartitioning = true)
   }
 
@@ -875,7 +978,7 @@ abstract class RDD[T: ClassTag](
     new MapPartitionsRDD(
       this,
       (_: TaskContext, index: Int, iter: Iterator[T]) => f(index, iter),
-      preservesPartitioning = preservesPartitioning,
+      preservesPartitioning,
       isOrderSensitive = isOrderSensitive)
   }
 
@@ -900,29 +1003,8 @@ abstract class RDD[T: ClassTag](
    */
   def mapPartitionsWithIndex[U: ClassTag](
       f: (Int, Iterator[T]) => Iterator[U],
-      preservesPartitioning: Boolean = false): RDD[U] = withScope {
-    val cleanedF = sc.clean(f)
-    new MapPartitionsRDD(
-      this,
-      (_: TaskContext, index: Int, iter: Iterator[T]) => cleanedF(index, iter),
-      preservesPartitioning)
-  }
-
-  /**
-   * Return a new RDD by applying a function to each partition of this RDD, while tracking the index
-   * of the original partition.
-   *
-   * `preservesPartitioning` indicates whether the input function preserves the partitioner, which
-   * should be `false` unless this is a pair RDD and the input function doesn't modify the keys.
-   *
-   * `isOrderSensitive` indicates whether the function is order-sensitive. If it is order
-   * sensitive, it may return totally different result when the input order
-   * is changed. Mostly stateful functions are order-sensitive.
-   */
-  private[spark] def mapPartitionsWithIndex[U: ClassTag](
-      f: (Int, Iterator[T]) => Iterator[U],
-      preservesPartitioning: Boolean,
-      isOrderSensitive: Boolean): RDD[U] = withScope {
+      preservesPartitioning: Boolean = false,
+      isOrderSensitive: Boolean = false): RDD[U] = withScope {
     val cleanedF = sc.clean(f)
     new MapPartitionsRDD(
       this,
@@ -930,6 +1012,7 @@ abstract class RDD[T: ClassTag](
       preservesPartitioning,
       isOrderSensitive = isOrderSensitive)
   }
+
 
   /**
    * Zips this RDD with another one, returning key-value pairs with the first element in each RDD,
