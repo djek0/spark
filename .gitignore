@@ -51,6 +51,7 @@ dist/
 # Ignore task logging output directories
 spark-trace/
 core/spark-task-output/
+build/zinc*
 docs/_site/
 docs/api
 docs/.local_ruby_bundle
