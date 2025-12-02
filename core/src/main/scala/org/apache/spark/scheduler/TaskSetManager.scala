@@ -143,6 +143,13 @@ private[spark] class TaskSetManager(
    * @return Boolean
    */
   private[scheduler] def isRelativeOnSameNode(index: Long, host: String, stage_id: Int): Boolean = {
+    // In local mode or single-executor mode, we must allow replicas on same host
+    // Otherwise they can never both run!
+    val isLocalMode = sched.sc.master.startsWith("local")
+    if (isLocalMode) {
+      logInfo(s"[REPLICATION] Local mode detected - allowing replicas on same host")
+      return false  // Don't block same-host scheduling in local mode
+    }
 
     if(stage_id >= 0) {
       if (taskIndexToHost.contains(stage_id)) {
@@ -153,6 +160,19 @@ private[spark] class TaskSetManager(
       }
     }
     false
+  }
+
+  /**
+   * Check if two task indices are replica partners (even/odd pair for same partition).
+   * For replication: index 0,1 are replicas; 2,3 are replicas; etc.
+   * 
+   * @param index1 First task index
+   * @param index2 Second task index
+   * @return true if they are replica partners
+   */
+  private[scheduler] def isReplicaPartner(index1: Int, index2: Int): Boolean = {
+    // Check if both belong to same partition (index/2) and are different parity (even/odd)
+    (index1 / 2 == index2 / 2) && (index1 % 2 != index2 % 2)
   }
 
   private[scheduler] val runningTasksSet = new HashSet[Long]
@@ -326,10 +346,9 @@ private[spark] class TaskSetManager(
             return Some(index)
           } else if (speculative && copiesRunning(index) == 1) {
             return Some(index)
-          } else if (!speculative && copiesRunning(index) == 1) {
-            // Allow second replica for task replication (non-speculative)
-            return Some(index)
           }
+          // For replication: We create 2 SEPARATE tasks (index 0 and 1)
+          // So we DON'T schedule the same index twice
         }
       }
     }
@@ -750,6 +769,7 @@ private[spark] class TaskSetManager(
   def handleSuccessfulTask(tid: Long, result: DirectTaskResult[_]): Unit = {
     val info = taskInfos(tid)
     val index = info.index
+    logInfo(s"[REPLICATION] handleSuccessfulTask called: tid=$tid, index=$index, successful($index)=${successful(index)}, killedByOtherAttempt.contains($tid)=${killedByOtherAttempt.contains(tid)}")
     // Check if any other attempt succeeded before this and this attempt has not been handled
     if (successful(index) && killedByOtherAttempt.contains(tid)) {
       // Undo the effect on calculatedTasks and totalResultSize made earlier when
@@ -773,18 +793,42 @@ private[spark] class TaskSetManager(
     }
     removeRunningTask(tid)
 
+    // Check if this task has a replica partner (different INDEX, even/odd pairing)
+    // Replica partners: index 0 and index 1 for partition 0; index 2 and 3 for partition 1, etc.
+    // We should NOT kill them because they're needed for Byzantine verification!
+    val replicaPartnerIndex = if (index % 2 == 0) index + 1 else index - 1
+    val hasReplicaPartner = if (replicaPartnerIndex >= 0 && replicaPartnerIndex < numTasks) {
+      val partnerAttempts = taskAttempts(replicaPartnerIndex)
+      val partnerRunning = partnerAttempts.exists(_.running)
+      val partnerSuccessful = successful(replicaPartnerIndex)
+      logInfo(s"[REPLICATION DEBUG] Task index=$index completed. Replica partner index=$replicaPartnerIndex, " +
+        s"running=$partnerRunning, successful=$partnerSuccessful, attempts=${partnerAttempts.size}")
+      // Don't kill if partner is running OR if partner already succeeded (Byzantine verification)
+      partnerRunning || partnerSuccessful
+    } else {
+      false
+    }
+
+    if (hasReplicaPartner) {
+      logInfo(s"[REPLICATION] Task index=$index succeeded, but NOT killing replica partner " +
+        s"index $replicaPartnerIndex - needed for Byzantine verification")
+    }
+
     // Kill any other attempts for the same task (since those are unnecessary now that one
     // attempt completed successfully).
-    for (attemptInfo <- taskAttempts(index) if attemptInfo.running) {
-      logInfo(s"Killing attempt ${attemptInfo.attemptNumber} for task ${attemptInfo.id} " +
-        s"in stage ${taskSet.id} (TID ${attemptInfo.taskId}) on ${attemptInfo.host} " +
-        s"as the attempt ${info.attemptNumber} succeeded on ${info.host}")
-      killedByOtherAttempt += attemptInfo.taskId
-      sched.backend.killTask(
-        attemptInfo.taskId,
-        attemptInfo.executorId,
-        interruptThread = true,
-        reason = "another attempt succeeded")
+    // IMPORTANT: Only kill speculative attempts, NOT replica partners!
+    if (!hasReplicaPartner) {
+      for (attemptInfo <- taskAttempts(index) if attemptInfo.running) {
+        logInfo(s"Killing attempt ${attemptInfo.attemptNumber} for task ${attemptInfo.id} " +
+          s"in stage ${taskSet.id} (TID ${attemptInfo.taskId}) on ${attemptInfo.host} " +
+          s"as the attempt ${info.attemptNumber} succeeded on ${info.host}")
+        killedByOtherAttempt += attemptInfo.taskId
+        sched.backend.killTask(
+          attemptInfo.taskId,
+          attemptInfo.executorId,
+          interruptThread = true,
+          reason = "another attempt succeeded")
+      }
     }
     if (!successful(index)) {
       tasksSuccessful += 1

@@ -275,6 +275,8 @@ private[spark] class DAGScheduler(
   }
 
   def canEndPartitionForResultStage(partitionId: Int): Boolean={
+    val count = partitionPerResultStage.getOrElse(partitionId, 0)
+    println(s"[DEBUG-HELPER] canEndPartitionForResultStage: partitionId=${partitionId}, count=${count}, result=${count >= 2}")
     if (partitionPerResultStage.contains(partitionId))
       return (partitionPerResultStage(partitionId) >= 2)
 
@@ -283,6 +285,9 @@ private[spark] class DAGScheduler(
   }
 
   def canMarkStageAsFinished(stage_id: Int): Boolean = {
+    val totalTasks = taskPerStage.getOrElse(stage_id, 0)
+    val completedTasks = completedTasksPerStage.getOrElse(stage_id, 0)
+    println(s"[DEBUG-HELPER] canMarkStageAsFinished: stageId=${stage_id}, totalTasks=${totalTasks}, completedTasks=${completedTasks}")
     if(taskPerStage.contains(stage_id) && completedTasksPerStage.contains(stage_id)){
       println(s"[EXTRA LOG][DAG] tasks: ${taskPerStage(stage_id)}, completed ${completedTasksPerStage(stage_id)}")
       return (taskPerStage(stage_id) == completedTasksPerStage(stage_id))
@@ -1476,7 +1481,7 @@ private[spark] class DAGScheduler(
    * Responds to a task finishing. This is called inside the event loop so it assumes that it can
    * modify the scheduler's internal state. Use taskEnded() to post a task end event from outside.
    */
-  private[scheduler] def handleTaskCompletion(event: CompletionEvent): Unit = {
+  private[scheduler] def handleTaskCompletion(event: CompletionEvent, bypassBatching: Boolean = false): Unit = {
     val task = event.task
     val stageId = task.stageId
     val taskIndex = event.taskInfo.index
@@ -1567,35 +1572,84 @@ private[spark] class DAGScheduler(
     }
 
     this.synchronized {
-      println(s"[DAG BATCHING] Processing task completion: stageId=${stageId}, taskIndex=${taskIndex}, partitionId=${taskIndex/2}")
-      if (unpostedTaskEndEvent.contains(stageId)) {
-        if (unpostedTaskEndEvent(stageId).contains(taskIndex / 2)) {
-          println(s"[DAG BATCHING] ✅ BOTH REPLICAS DONE: Posting both events for partition ${taskIndex/2}")
-          if(taskIndex % 2 == 0){
-            postTaskEnd(unpostedTaskEndEvent(stageId)(taskIndex / 2))
+      if (!bypassBatching) {
+        // With different-index approach: replicas have indices 0,1 for partition 0; 2,3 for partition 1
+        // So we use taskIndex/2 to map to partition ID for batching
+        val partitionId = taskIndex / 2
+        println(s"[DAG BATCHING] Processing task completion: stageId=${stageId}, taskIndex=${taskIndex}, partitionId=${partitionId}")
+        if (unpostedTaskEndEvent.contains(stageId)) {
+          if (unpostedTaskEndEvent(stageId).contains(partitionId)) {
+            println(s"[DAG BATCHING] ✅ BOTH REPLICAS DONE: Processing both events for partition ${partitionId}")
+            // Process both events through the normal completion flow
+            val firstEvent = unpostedTaskEndEvent(stageId)(partitionId)
+            
+            // Post both events to listener bus
+            postTaskEnd(firstEvent)
             postTaskEnd(event)
+            
+            // Update completion counter
             addCompletedTaskPerStage(stageId, 2)
+            // Clean up the stored event
+            unpostedTaskEndEvent(stageId).remove(partitionId)
+            
+            // Determine which event to process for job completion
+            // BOTH replicas should succeed for Byzantine verification
+            // But we accept one success as fallback (Byzantine resilience)
+            val firstSuccess = firstEvent.reason match { case Success => true; case _ => false }
+            val currentSuccess = event.reason match { case Success => true; case _ => false }
+            
+            val eventToProcess = (firstSuccess, currentSuccess) match {
+              case (true, true) =>
+                // IDEAL CASE: Both replicas succeeded!
+                println(s"[DAG BATCHING] ✅✅ BOTH replicas succeeded! Byzantine verification complete.")
+                println(s"[DAG BATCHING] Processing current event (taskId=${event.taskInfo.taskId})")
+                event
+              case (true, false) =>
+                // FALLBACK: First succeeded, current failed
+                println(s"[DAG BATCHING] ⚠️ Current event (taskId=${event.taskInfo.taskId}) failed: ${event.reason.getClass.getSimpleName}")
+                println(s"[DAG BATCHING] ✅ First event (taskId=${firstEvent.taskInfo.taskId}) succeeded - using it (Byzantine resilience)")
+                firstEvent
+              case (false, true) =>
+                // FALLBACK: Current succeeded, first failed
+                println(s"[DAG BATCHING] ⚠️ First event (taskId=${firstEvent.taskInfo.taskId}) failed")
+                println(s"[DAG BATCHING] ✅ Current event (taskId=${event.taskInfo.taskId}) succeeded - using it (Byzantine resilience)")
+                event
+              case (false, false) =>
+                // ERROR: Both failed!
+                println(s"[DAG BATCHING] ❌❌ BOTH replicas failed! Cannot complete partition.")
+                return  // Both failed, return early
+            }
+            
+            // Continue processing with the successful event
+            if (eventToProcess != event) {
+              // Need to reprocess with the first event instead
+              println(s"[DAG BATCHING] 🔄 Switching to process first event for job completion")
+              handleTaskCompletion(firstEvent, bypassBatching = true)
+              return
+            }
+            // else: current event is Success, continue normal flow below
           }
-          else{
-            postTaskEnd(event)
-            postTaskEnd(unpostedTaskEndEvent(stageId)(taskIndex / 2))
-            addCompletedTaskPerStage(stageId, 2)
+          else {
+            println(s"[DAG BATCHING] ⏳ FIRST REPLICA: Storing event for partition ${partitionId}, waiting for partner")
+            unpostedTaskEndEvent(stageId)(partitionId) = event
+            return  // Return early, wait for second replica
           }
         }
         else {
-          println(s"[DAG BATCHING] ⏳ FIRST REPLICA: Storing event for partition ${taskIndex/2}, waiting for partner")
-          unpostedTaskEndEvent(stageId)(taskIndex / 2) = event
+          println(s"[DAG BATCHING] ⏳ FIRST STAGE COMPLETION: Creating storage for stage ${stageId}, partition ${partitionId}")
+          unpostedTaskEndEvent(stageId) = HashMap(partitionId -> event)
+          return  // Return early, wait for second replica
         }
-      }
-      else {
-        println(s"[DAG BATCHING] ⏳ FIRST STAGE COMPLETION: Creating storage for stage ${stageId}, partition ${taskIndex/2}")
-        unpostedTaskEndEvent(stageId) = HashMap(taskIndex / 2 -> event)
       }
     }
 
 
+    println(s"[DEBUG] About to process event.reason for taskId=${event.taskInfo.taskId}, taskIndex=${taskIndex}")
+    println(s"[DEBUG] event.reason = ${event.reason}, event.reason.getClass = ${event.reason.getClass}")
+    
     event.reason match {
       case Success =>
+        println(s"[DEBUG] ✅ Event reason is Success for taskId=${event.taskInfo.taskId}")
         // An earlier attempt of a stage (which is zombie) may still have running tasks. If these
         // tasks complete, they still count and we can mark the corresponding partitions as
         // finished. Here we notify the task scheduler to skip running tasks for the same partition,
@@ -1607,19 +1661,27 @@ private[spark] class DAGScheduler(
 
         task match {
           case rt: ResultTask[_, _] =>
+            println(s"[DEBUG] Processing ResultTask for taskId=${event.taskInfo.taskId}, outputId=${rt.outputId}, partitionId=${rt.partitionId}")
             // Cast to ResultStage here because it's part of the ResultTask
             // TODO Refactor this out to a function that accepts a ResultStage
             val resultStage = stage.asInstanceOf[ResultStage]
             resultStage.activeJob match {
               case Some(job) =>
-                if (!job.finished(rt.outputId) && canEndPartitionForResultStage(rt.partitionId)) {
+                println(s"[DEBUG] ActiveJob found. job.finished(${rt.outputId})=${job.finished(rt.outputId)}")
+                val canEnd = canEndPartitionForResultStage(rt.partitionId)
+                println(s"[DEBUG] canEndPartitionForResultStage(${rt.partitionId})=${canEnd}")
+                if (!job.finished(rt.outputId) && canEnd) {
+                  println(s"[DEBUG] ✅ Marking partition complete: outputId=${rt.outputId}")
                   job.finished(rt.outputId) = true
                   job.numFinished += 1
                   // If the whole job has finished, remove it
                   logInfo(s"[EXTRA LOG][DAG SCHEDULER] NUM FINISHED = ${job.numFinished}")
                   logInfo(s"[EXTRA LOG][DAG SCHEDULER] NUM PARTITIONS = ${job.numPartitions}")
+                  val canFinish = canMarkStageAsFinished(stageId)
+                  println(s"[DEBUG] canMarkStageAsFinished(${stageId})=${canFinish}")
 //                  if (job.numFinished == job.numPartitions) {
-                  if(canMarkStageAsFinished(stageId)){
+                  if(canFinish){
+                    println(s"[DEBUG] 🎉 JOB FINISHING: Starting job completion for job ${job.jobId}")
                     markStageAsFinished(resultStage)
                     cancelRunningIndependentStages(job, s"Job ${job.jobId} is finished.")
                     cleanupStateForJobAndIndependentStages(job)
@@ -1971,15 +2033,19 @@ private[spark] class DAGScheduler(
         handleResubmittedFailure(task, stage)
 
       case _: TaskCommitDenied =>
+        println(s"[DEBUG] ❌ Event reason is TaskCommitDenied for taskId=${event.taskInfo.taskId}")
         // Do nothing here, left up to the TaskScheduler to decide how to handle denied commits
 
       case _: ExceptionFailure | _: TaskKilled =>
+        println(s"[DEBUG] ❌ Event reason is ExceptionFailure/TaskKilled for taskId=${event.taskInfo.taskId}")
         // Nothing left to do, already handled above for accumulator updates.
 
       case TaskResultLost =>
+        println(s"[DEBUG] ❌ Event reason is TaskResultLost for taskId=${event.taskInfo.taskId}")
         // Do nothing here; the TaskScheduler handles these failures and resubmits the task.
 
       case _: ExecutorLostFailure | UnknownReason =>
+        println(s"[DEBUG] ❌ Event reason is ExecutorLostFailure/UnknownReason for taskId=${event.taskInfo.taskId}")
         // Unrecognized failure - also do nothing. If the task fails repeatedly, the TaskScheduler
         // will abort the job.
     }
