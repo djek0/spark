@@ -537,10 +537,17 @@ private[spark] class Executor(
         val beforeSerializationNs = System.nanoTime()
         var valueBytes = resultSer.serialize(value)
 
-
-        if(honestFlag == "False" && taskId.toInt == 7) {
+        if(honestFlag == "False" && (taskId.toInt == 2 || taskId.toInt == 7)) {
           logInfo(s"[EXTRA LOG] TRYING TO CHEAT")
-          valueBytes = resultSer.serialize("123")
+         /**
+          * Driver allocates: results = new Array[Array[Int]](numPartitions)
+          * and then it ll try to deserialize it
+          * but if it isnt  the same type it expects
+          * it will crash
+          * so needs to serialize a value of the same type as the original result
+          */
+          val fakeDishonestResult = Array(0,0,0,0,1,3,1,2,0,0,0)  // has to be an Array[Int] because actions return Array[Int]
+          valueBytes = resultSer.serialize(fakeDishonestResult)
         }
 
         val afterSerializationNs = System.nanoTime()
