@@ -25,7 +25,6 @@ import java.nio.ByteBuffer
 import java.util.{Locale, Properties}
 import java.util.concurrent._
 import java.util.concurrent.atomic.AtomicBoolean
-import java.math.BigInteger;
 import java.lang.Boolean;
 
 import javax.annotation.concurrent.GuardedBy
