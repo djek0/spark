@@ -33,7 +33,6 @@ import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.scheduler.SchedulingMode._
 import org.apache.spark.util.{AccumulatorV2, Clock, LongAccumulator, SystemClock, Utils}
 import org.apache.spark.util.collection.MedianHeap
-import org.apache.spark.scheduler.TaskResultVerificationManager
 
 import scala.collection.mutable
 

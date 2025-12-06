@@ -18,13 +18,7 @@
 package org.apache.spark.scheduler
 
 import java.nio.ByteBuffer
-import java.util.concurrent.{ExecutorService, RejectedExecutionException}
-import java.nio._
-import java.util._
-import java.util.Properties
-import java.util.concurrent._
-import java.util.concurrent.atomic.AtomicBoolean
-import java.math.BigInteger;
+import java.util.concurrent.RejectedExecutionException
 
 import scala.language.existentials
 import scala.util.control.NonFatal
@@ -34,7 +28,6 @@ import org.apache.spark.TaskState.TaskState
 import org.apache.spark.internal.Logging
 import org.apache.spark.serializer.SerializerInstance
 import org.apache.spark.util.{LongAccumulator, ThreadUtils, Utils}
-import org.apache.spark.scheduler.TaskResultVerificationManager
 /**
  * Runs a thread pool that deserializes and remotely fetches (if necessary) task results.
  */

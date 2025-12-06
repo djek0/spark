@@ -1,7 +1,8 @@
 package org.apache.spark.scheduler
 
+import scala.collection.mutable.HashMap
+
 import org.apache.spark.internal.Logging
-import scala.collection.mutable.{HashMap, HashSet}
 
 object TaskResultVerificationManager extends Logging {
 
