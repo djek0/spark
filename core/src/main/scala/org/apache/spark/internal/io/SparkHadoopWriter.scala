@@ -96,8 +96,9 @@ object SparkHadoopWriter extends Logging {
           iterator = iter)
       })
 
-      committer.commitJob(jobContext, ret)
-      logInfo(s"Job ${jobContext.getJobID} committed.")
+      logInfo(s"Start to commit write Job ${jobContext.getJobID}.")
+      val (_, duration) = Utils.timeTakenMs { committer.commitJob(jobContext, ret) }
+      logInfo(s"Write Job ${jobContext.getJobID} committed. Elapsed time: $duration ms.")
     } catch {
       case cause: Throwable =>
         logError(s"Aborting job ${jobContext.getJobID}.", cause)
@@ -227,7 +228,9 @@ class HadoopMapRedWriteConfigUtil[K, V: ClassTag](conf: SerializableJobConf)
       if (path != null) {
         path.getFileSystem(getConf)
       } else {
+        // scalastyle:off FileSystemGet
         FileSystem.get(getConf)
+        // scalastyle:on FileSystemGet
       }
     }
 
@@ -290,7 +293,9 @@ class HadoopMapRedWriteConfigUtil[K, V: ClassTag](conf: SerializableJobConf)
 
     if (SparkHadoopWriterUtils.isOutputSpecValidationEnabled(conf)) {
       // FileOutputFormat ignores the filesystem parameter
+      // scalastyle:off FileSystemGet
       val ignoredFs = FileSystem.get(getConf)
+      // scalastyle:on FileSystemGet
       getOutputFormat().checkOutputSpecs(ignoredFs, getConf)
     }
   }

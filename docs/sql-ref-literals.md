@@ -44,6 +44,8 @@ A string literal is used to specify a character string value.
 * **char**
 
     One character from the character set. Use `\` to escape special characters (e.g., `'` or `\`).
+    To represent unicode characters, use 16-bit or 32-bit unicode escape of the form `\uxxxx` or `\Uxxxxxxxx`,
+    where xxxx and xxxxxxxx are 16-bit and 32-bit code points in hexadecimal respectively (e.g., `\u3042` for `あ` and `\U0001F44D` for `👍`).
 
 #### Examples
 
@@ -219,6 +221,11 @@ double literals:
 decimal_digits  { D | exponent [ D ] }  | digit [ ... ] { exponent [ D ] | [ exponent ] D }
 ```
 
+float literals:
+```sql
+decimal_digits  { F | exponent [ F ] }  | digit [ ... ] { exponent [ F ] | [ exponent ] F }
+```
+
 While decimal_digits is defined as
 ```sql
 [ + | - ] { digit [ ... ] . [ digit [ ... ] ] | . digit [ ... ] }
@@ -238,6 +245,10 @@ E [ + | - ] digit [ ... ]
 * **D**
 
     Case insensitive, indicates `DOUBLE`, which is an 8-byte double-precision floating point number.
+
+* **F**
+
+    Case insensitive, indicates `FLOAT`, which is a 4-byte single-precision floating point number.
 
 * **BD**
 

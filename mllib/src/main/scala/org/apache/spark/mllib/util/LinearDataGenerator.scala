@@ -20,8 +20,6 @@ package org.apache.spark.mllib.util
 import scala.collection.JavaConverters._
 import scala.util.Random
 
-import com.github.fommil.netlib.BLAS.{getInstance => blas}
-
 import org.apache.spark.SparkContext
 import org.apache.spark.annotation.Since
 import org.apache.spark.mllib.linalg.{BLAS, Vectors}
@@ -181,7 +179,7 @@ object LinearDataGenerator {
     val data: RDD[LabeledPoint] = sc.parallelize(0 until nparts, nparts).flatMap { p =>
       val seed = 42 + p
       val examplesInPartition = nexamples / nparts
-      generateLinearInput(intercept, w.toArray, examplesInPartition, seed, eps)
+      generateLinearInput(intercept, w, examplesInPartition, seed, eps)
     }
     data
   }

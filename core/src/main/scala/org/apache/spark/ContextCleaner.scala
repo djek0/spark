@@ -172,6 +172,13 @@ private[spark] class ContextCleaner(
     registerForCleanup(rdd, CleanCheckpoint(parentId))
   }
 
+  /** Register a SparkListener to be cleaned up when its owner is garbage collected. */
+  def registerSparkListenerForCleanup(
+      listenerOwner: AnyRef,
+      listener: SparkListener): Unit = {
+    registerForCleanup(listenerOwner, CleanSparkListener(listener))
+  }
+
   /** Register an object for cleanup. */
   private def registerForCleanup(objectForCleanup: AnyRef, task: CleanupTask): Unit = {
     referenceBuffer.add(new CleanupTaskWeakReference(task, objectForCleanup, referenceQueue))
@@ -233,11 +240,15 @@ private[spark] class ContextCleaner(
   /** Perform shuffle cleanup. */
   def doCleanupShuffle(shuffleId: Int, blocking: Boolean): Unit = {
     try {
-      logDebug("Cleaning shuffle " + shuffleId)
-      mapOutputTrackerMaster.unregisterShuffle(shuffleId)
-      shuffleDriverComponents.removeShuffle(shuffleId, blocking)
-      listeners.asScala.foreach(_.shuffleCleaned(shuffleId))
-      logDebug("Cleaned shuffle " + shuffleId)
+      if (mapOutputTrackerMaster.containsShuffle(shuffleId)) {
+        logDebug("Cleaning shuffle " + shuffleId)
+        mapOutputTrackerMaster.unregisterShuffle(shuffleId)
+        shuffleDriverComponents.removeShuffle(shuffleId, blocking)
+        listeners.asScala.foreach(_.shuffleCleaned(shuffleId))
+        logDebug("Cleaned shuffle " + shuffleId)
+      } else {
+        logDebug("Asked to cleanup non-existent shuffle (maybe it was already removed)")
+      }
     } catch {
       case e: Exception => logError("Error cleaning shuffle " + shuffleId, e)
     }

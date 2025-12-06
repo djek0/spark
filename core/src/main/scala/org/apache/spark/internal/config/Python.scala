@@ -50,4 +50,18 @@ private[spark] object Python {
     .version("2.4.0")
     .bytesConf(ByteUnit.MiB)
     .createOptional
+
+  val PYTHON_AUTH_SOCKET_TIMEOUT = ConfigBuilder("spark.python.authenticate.socketTimeout")
+    .internal()
+    .version("3.1.0")
+    .timeConf(TimeUnit.SECONDS)
+    .createWithDefaultString("15s")
+
+  val PYTHON_WORKER_FAULTHANLDER_ENABLED = ConfigBuilder("spark.python.worker.faulthandler.enabled")
+    .doc("When true, Python workers set up the faulthandler for the case when the Python worker " +
+      "exits unexpectedly (crashes), and shows the stack trace of the moment the Python worker " +
+      "crashes in the error message if captured successfully.")
+    .version("3.2.0")
+    .booleanConf
+    .createWithDefault(false)
 }

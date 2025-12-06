@@ -24,7 +24,8 @@ import java.util.Properties
 import org.apache.spark._
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.{config, Logging}
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{RDD, Trace}
+
 
 /**
  * A ShuffleMapTask divides the elements of an RDD into multiple buckets (based on a partitioner
@@ -66,7 +67,7 @@ private[spark] class ShuffleMapTask(
   with Logging {
 
   /** A constructor used only in test suites. This does not require passing in an RDD. */
-  def this(partitionId: Int) {
+  def this(partitionId: Int) = {
     this(0, 0, null, new Partition { override def index: Int = 0 }, null, new Properties, null)
   }
 
@@ -96,7 +97,14 @@ private[spark] class ShuffleMapTask(
     val mapId = if (SparkEnv.get.conf.get(config.SHUFFLE_USE_OLD_FETCH_PROTOCOL)) {
       partitionId
     } else context.taskAttemptId()
-    dep.shuffleWriterProcessor.write(rdd, dep, mapId, context, partition)
+
+    val result = dep.shuffleWriterProcessor.write(rdd, dep, mapId, context, partition)
+
+    // Ensure SuffleMapTasks tmp files get commited as log too
+    // because they are their writer is already closed until ResultTask finish
+    // and thus not commited by ResultTask
+    Trace.commitAllLogs()
+    result
   }
 
   override def preferredLocations: Seq[TaskLocation] = preferredLocs

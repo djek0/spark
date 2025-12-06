@@ -27,6 +27,7 @@ license: |
 
 ```sql
 LIST { JAR | JARS } file_name [ ... ]
+
 ```
 
 ### Examples
@@ -48,5 +49,6 @@ spark://192.168.1.112:62859/jars/test.jar
 
 * [ADD JAR](sql-ref-syntax-aux-resource-mgmt-add-jar.html)
 * [ADD FILE](sql-ref-syntax-aux-resource-mgmt-add-file.html)
+* [ADD ARCHIVE](sql-ref-syntax-aux-resource-mgmt-add-archive.html)
 * [LIST FILE](sql-ref-syntax-aux-resource-mgmt-list-file.html)
-
+* [LIST ARCHIVE](sql-ref-syntax-aux-resource-mgmt-list-archive.html)

@@ -20,10 +20,8 @@ import warnings
 from collections import namedtuple
 
 from pyspark import since
-from pyspark.rdd import ignore_unicode_prefix, PythonEvalType
 from pyspark.sql.dataframe import DataFrame
-from pyspark.sql.udf import UserDefinedFunction
-from pyspark.sql.types import IntegerType, StringType, StructType
+from pyspark.sql.types import StructType
 
 
 Database = namedtuple("Database", "name description locationUri")
@@ -44,19 +42,16 @@ class Catalog(object):
         self._jsparkSession = sparkSession._jsparkSession
         self._jcatalog = sparkSession._jsparkSession.catalog()
 
-    @ignore_unicode_prefix
     @since(2.0)
     def currentDatabase(self):
         """Returns the current default database in this session."""
         return self._jcatalog.currentDatabase()
 
-    @ignore_unicode_prefix
     @since(2.0)
     def setCurrentDatabase(self, dbName):
         """Sets the current default database in this session."""
         return self._jcatalog.setCurrentDatabase(dbName)
 
-    @ignore_unicode_prefix
     @since(2.0)
     def listDatabases(self):
         """Returns a list of databases available across all sessions."""
@@ -70,7 +65,32 @@ class Catalog(object):
                 locationUri=jdb.locationUri()))
         return databases
 
-    @ignore_unicode_prefix
+    def databaseExists(self, dbName):
+        """Check if the database with the specified name exists.
+
+        .. versionadded:: 3.3.0
+
+        Parameters
+        ----------
+        dbName : str
+             name of the database to check existence
+
+        Returns
+        -------
+        bool
+            Indicating whether the database exists
+
+        Examples
+        --------
+        >>> spark.catalog.databaseExists("test_new_database")
+        False
+        >>> df = spark.sql("CREATE DATABASE test_new_database")
+        >>> spark.catalog.databaseExists("test_new_database")
+        True
+        >>> df = spark.sql("DROP DATABASE test_new_database")
+        """
+        return self._jcatalog.databaseExists(dbName)
+
     @since(2.0)
     def listTables(self, dbName=None):
         """Returns a list of tables/views in the specified database.
@@ -92,7 +112,6 @@ class Catalog(object):
                 isTemporary=jtable.isTemporary()))
         return tables
 
-    @ignore_unicode_prefix
     @since(2.0)
     def listFunctions(self, dbName=None):
         """Returns a list of functions registered in the specified database.
@@ -113,14 +132,44 @@ class Catalog(object):
                 isTemporary=jfunction.isTemporary()))
         return functions
 
-    @ignore_unicode_prefix
-    @since(2.0)
+    def functionExists(self, functionName, dbName=None):
+        """Check if the function with the specified name exists.
+        This can either be a temporary function or a function.
+
+        .. versionadded:: 3.3.0
+
+        Parameters
+        ----------
+        functionName : str
+            name of the function to check existence
+        dbName : str, optional
+            name of the database to check function existence in.
+            If no database is specified, the current database is used
+
+        Returns
+        -------
+        bool
+            Indicating whether the function exists
+
+        Examples
+        --------
+        >>> spark.catalog.functionExists("unexisting_function")
+        False
+        """
+        if dbName is None:
+            dbName = self.currentDatabase()
+        return self._jcatalog.functionExists(dbName, functionName)
+
     def listColumns(self, tableName, dbName=None):
         """Returns a list of columns for the given table/view in the specified database.
 
         If no database is specified, the current database is used.
 
-        Note: the order of arguments here is different from that of its JVM counterpart
+       .. versionadded:: 2.0.0
+
+        Notes
+        -----
+        the order of arguments here is different from that of its JVM counterpart
         because Python does not support method overloading.
         """
         if dbName is None:
@@ -138,7 +187,61 @@ class Catalog(object):
                 isBucket=jcolumn.isBucket()))
         return columns
 
-    @since(2.0)
+    def tableExists(self, tableName, dbName=None):
+        """Check if the table or view with the specified name exists.
+        This can either be a temporary view or a table/view.
+
+        .. versionadded:: 3.3.0
+
+        Parameters
+        ----------
+        tableName : str
+                    name of the table to check existence
+        dbName : str, optional
+                 name of the database to check table existence in.
+                 If no database is specified, the current database is used
+
+        Returns
+        -------
+        bool
+            Indicating whether the table/view exists
+
+        Examples
+        --------
+
+        This function can check if a table is defined or not:
+
+        >>> spark.catalog.tableExists("unexisting_table")
+        False
+        >>> df = spark.sql("CREATE TABLE tab1 (name STRING, age INT) USING parquet")
+        >>> spark.catalog.tableExists("tab1")
+        True
+        >>> df = spark.sql("DROP TABLE tab1")
+        >>> spark.catalog.tableExists("unexisting_table")
+        False
+
+        It also works for views:
+
+        >>> spark.catalog.tableExists("view1")
+        False
+        >>> df = spark.sql("CREATE VIEW view1 AS SELECT 1")
+        >>> spark.catalog.tableExists("view1")
+        True
+        >>> df = spark.sql("DROP VIEW view1")
+        >>> spark.catalog.tableExists("view1")
+        False
+
+        And also for temporary views:
+
+        >>> df = spark.sql("CREATE TEMPORARY VIEW view1 AS SELECT 1")
+        >>> spark.catalog.tableExists("view1")
+        True
+        >>> df = spark.sql("DROP VIEW view1")
+        >>> spark.catalog.tableExists("view1")
+        False
+        """
+        return self._jcatalog.tableExists(dbName, tableName)
+
     def createExternalTable(self, tableName, path=None, source=None, schema=None, **options):
         """Creates a table based on the dataset in a data source.
 
@@ -151,15 +254,20 @@ class Catalog(object):
         Optionally, a schema can be provided as the schema of the returned :class:`DataFrame` and
         created external table.
 
-        :return: :class:`DataFrame`
+        .. versionadded:: 2.0.0
+
+        Returns
+        -------
+        :class:`DataFrame`
         """
         warnings.warn(
             "createExternalTable is deprecated since Spark 2.2, please use createTable instead.",
-            DeprecationWarning)
+            FutureWarning
+        )
         return self.createTable(tableName, path, source, schema, **options)
 
-    @since(2.2)
-    def createTable(self, tableName, path=None, source=None, schema=None, **options):
+    def createTable(
+            self, tableName, path=None, source=None, schema=None, description=None, **options):
         """Creates a table based on the dataset in a data source.
 
         It returns the DataFrame associated with the table.
@@ -172,30 +280,45 @@ class Catalog(object):
         Optionally, a schema can be provided as the schema of the returned :class:`DataFrame` and
         created table.
 
-        :return: :class:`DataFrame`
+        .. versionadded:: 2.2.0
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        .. versionchanged:: 3.1
+           Added the ``description`` parameter.
         """
         if path is not None:
             options["path"] = path
         if source is None:
             source = self._sparkSession._wrapped._conf.defaultDataSourceName()
+        if description is None:
+            description = ""
         if schema is None:
-            df = self._jcatalog.createTable(tableName, source, options)
+            df = self._jcatalog.createTable(tableName, source, description, options)
         else:
             if not isinstance(schema, StructType):
                 raise TypeError("schema should be StructType")
             scala_datatype = self._jsparkSession.parseDataType(schema.json())
-            df = self._jcatalog.createTable(tableName, source, scala_datatype, options)
+            df = self._jcatalog.createTable(
+                tableName, source, scala_datatype, description, options)
         return DataFrame(df, self._sparkSession._wrapped)
 
-    @since(2.0)
     def dropTempView(self, viewName):
         """Drops the local temporary view with the given view name in the catalog.
         If the view has been cached before, then it will also be uncached.
         Returns true if this view is dropped successfully, false otherwise.
 
-        Note that, the return type of this method was None in Spark 2.0, but changed to Boolean
+        .. versionadded:: 2.0.0
+
+        Notes
+        -----
+        The return type of this method was None in Spark 2.0, but changed to Boolean
         in Spark 2.1.
 
+        Examples
+        --------
         >>> spark.createDataFrame([(1, 1)]).createTempView("my_table")
         >>> spark.table("my_table").collect()
         [Row(_1=1, _2=1)]
@@ -207,12 +330,15 @@ class Catalog(object):
         """
         self._jcatalog.dropTempView(viewName)
 
-    @since(2.1)
     def dropGlobalTempView(self, viewName):
         """Drops the global temporary view with the given view name in the catalog.
         If the view has been cached before, then it will also be uncached.
         Returns true if this view is dropped successfully, false otherwise.
 
+        .. versionadded:: 2.1.0
+
+        Examples
+        --------
         >>> spark.createDataFrame([(1, 1)]).createGlobalTempView("my_table")
         >>> spark.table("global_temp.my_table").collect()
         [Row(_1=1, _2=1)]
@@ -224,16 +350,19 @@ class Catalog(object):
         """
         self._jcatalog.dropGlobalTempView(viewName)
 
-    @since(2.0)
     def registerFunction(self, name, f, returnType=None):
         """An alias for :func:`spark.udf.register`.
         See :meth:`pyspark.sql.UDFRegistration.register`.
 
-        .. note:: Deprecated in 2.3.0. Use :func:`spark.udf.register` instead.
+        .. versionadded:: 2.0.0
+
+        .. deprecated:: 2.3.0
+            Use :func:`spark.udf.register` instead.
         """
         warnings.warn(
             "Deprecated in 2.3.0. Use spark.udf.register instead.",
-            DeprecationWarning)
+            FutureWarning
+        )
         return self._sparkSession.udf.register(name, f, returnType)
 
     @since(2.0)

@@ -37,12 +37,14 @@ import org.apache.hadoop.hive.ql.session.SessionState
 import org.apache.hadoop.security.{Credentials, UserGroupInformation}
 import org.apache.log4j.Level
 import org.apache.thrift.transport.TSocket
+import org.slf4j.LoggerFactory
 import sun.misc.{Signal, SignalHandler}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.AnalysisException
+import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.hive.HiveUtils
 import org.apache.spark.sql.hive.client.HiveClientImpl
 import org.apache.spark.sql.hive.security.HiveDelegationTokenProvider
@@ -59,6 +61,7 @@ private[hive] object SparkSQLCLIDriver extends Logging {
   private var transport: TSocket = _
   private final val SPARK_HADOOP_PROP_PREFIX = "spark.hadoop."
 
+  initializeLogIfNecessary(true)
   installSignalHandler()
 
   /**
@@ -131,15 +134,17 @@ private[hive] object SparkSQLCLIDriver extends Logging {
       UserGroupInformation.getCurrentUser.addCredentials(credentials)
     }
 
-    SharedState.resolveWarehousePath(sparkConf, conf)
-    SessionState.start(sessionState)
+    val warehousePath = SharedState.resolveWarehousePath(sparkConf, conf)
+    val qualified = SharedState.qualifyWarehousePath(conf, warehousePath)
+    SharedState.setWarehousePathConf(sparkConf, conf, qualified)
+    SessionState.setCurrentSessionState(sessionState)
 
     // Clean up after we exit
     ShutdownHookManager.addShutdownHook { () => SparkSQLEnv.stop() }
 
     if (isRemoteMode(sessionState)) {
       // Hive 1.2 + not supported in CLI
-      throw new RuntimeException("Remote operations not supported")
+      throw QueryExecutionErrors.remoteOperationsUnsupportedError()
     }
     // Respect the configurations set by --hiveconf from the command line
     // (based on Hive's CliDriver).
@@ -165,10 +170,10 @@ private[hive] object SparkSQLCLIDriver extends Logging {
     }
 
     // The class loader of CliSessionState's conf is current main thread's class loader
-    // used to load jars passed by --jars. One class loader used by AddJarCommand is
+    // used to load jars passed by --jars. One class loader used by AddJarsCommand is
     // sharedState.jarClassLoader which contain jar path passed by --jars in main thread.
     // We set CliSessionState's conf class loader to sharedState.jarClassLoader.
-    // Thus we can load all jars passed by --jars and AddJarCommand.
+    // Thus we can load all jars passed by --jars and AddJarsCommand.
     sessionState.getConf.setClassLoader(SparkSQLEnv.sqlContext.sharedState.jarClassLoader)
 
     // TODO work around for set the log output to console, because the HiveContext
@@ -196,6 +201,8 @@ private[hive] object SparkSQLCLIDriver extends Logging {
     for ((k, v) <- newHiveConf if k != "hive.metastore.warehouse.dir") {
       SparkSQLEnv.sqlContext.setConf(k, v)
     }
+
+    cli.printMasterAndAppId
 
     if (sessionState.execString != null) {
       System.exit(cli.processLine(sessionState.execString))
@@ -266,8 +273,6 @@ private[hive] object SparkSQLCLIDriver extends Logging {
     def continuedPromptWithDBSpaces: String = continuedPrompt + ReflectionUtils.invokeStatic(
       classOf[CliDriver], "spacesForString", classOf[String] -> currentDB)
 
-    cli.printMasterAndAppId
-
     var currentPrompt = promptWithCurrentDB
     var line = reader.readLine(currentPrompt + "> ")
 
@@ -306,7 +311,9 @@ private[hive] object SparkSQLCLIDriver extends Logging {
 private[hive] class SparkSQLCLIDriver extends CliDriver with Logging {
   private val sessionState = SessionState.get().asInstanceOf[CliSessionState]
 
-  private val console = ThriftserverShimUtils.getConsole
+  private val LOG = LoggerFactory.getLogger(classOf[SparkSQLCLIDriver])
+
+  private val console = new SessionState.LogHelper(LOG)
 
   private val isRemoteMode = {
     SparkSQLCLIDriver.isRemoteMode(sessionState)
@@ -324,7 +331,7 @@ private[hive] class SparkSQLCLIDriver extends CliDriver with Logging {
     }
   } else {
     // Hive 1.2 + not supported in CLI
-    throw new RuntimeException("Remote operations not supported")
+    throw QueryExecutionErrors.remoteOperationsUnsupportedError()
   }
 
   override def setHiveVariables(hiveVariables: java.util.Map[String, String]): Unit = {
@@ -400,7 +407,8 @@ private[hive] class SparkSQLCLIDriver extends CliDriver with Logging {
 
           val res = new JArrayList[String]()
 
-          if (HiveConf.getBoolVar(conf, HiveConf.ConfVars.HIVE_CLI_PRINT_HEADER)) {
+          if (HiveConf.getBoolVar(conf, HiveConf.ConfVars.HIVE_CLI_PRINT_HEADER) ||
+              SparkSQLEnv.sqlContext.conf.cliPrintHeader) {
             // Print the column names.
             Option(driver.getSchema.getFieldSchemas).foreach { fields =>
               out.println(fields.asScala.map(_.getName).mkString("\t"))
@@ -461,7 +469,7 @@ private[hive] class SparkSQLCLIDriver extends CliDriver with Logging {
       oldSignal = Signal.handle(interruptSignal, new SignalHandler() {
         private var interruptRequested: Boolean = false
 
-        override def handle(signal: Signal) {
+        override def handle(signal: Signal): Unit = {
           val initialRequest = !interruptRequested
           interruptRequested = true
 

@@ -26,13 +26,14 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileStatus, Path}
 import org.apache.orc.{OrcConf, OrcFile, Reader, TypeDescription, Writer}
 
-import org.apache.spark.{SPARK_VERSION_SHORT, SparkException}
+import org.apache.spark.SPARK_VERSION_SHORT
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{SPARK_VERSION_METADATA_KEY, SparkSession}
 import org.apache.spark.sql.catalyst.analysis.caseSensitiveResolution
 import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
-import org.apache.spark.sql.catalyst.util.quoteIdentifier
+import org.apache.spark.sql.catalyst.util.{quoteIdentifier, CharVarcharUtils}
+import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.execution.datasources.SchemaMergeUtils
 import org.apache.spark.sql.types._
 import org.apache.spark.util.{ThreadUtils, Utils}
@@ -44,6 +45,8 @@ object OrcUtils extends Logging {
     "NONE" -> "",
     "SNAPPY" -> ".snappy",
     "ZLIB" -> ".zlib",
+    "ZSTD" -> ".zstd",
+    "LZ4" -> ".lz4",
     "LZO" -> ".lzo")
 
   def listOrcFiles(pathStr: String, conf: Configuration): Seq[Path] = {
@@ -76,9 +79,16 @@ object OrcUtils extends Logging {
           logWarning(s"Skipped the footer in the corrupted file: $file", e)
           None
         } else {
-          throw new SparkException(s"Could not read footer for file: $file", e)
+          throw QueryExecutionErrors.cannotReadFooterForFileError(file, e)
         }
     }
+  }
+
+  private def toCatalystSchema(schema: TypeDescription): StructType = {
+    // The Spark query engine has not completely supported CHAR/VARCHAR type yet, and here we
+    // replace the orc CHAR/VARCHAR with STRING type.
+    CharVarcharUtils.replaceCharVarcharWithStringInSchema(
+      CatalystSqlParser.parseDataType(schema.toString).asInstanceOf[StructType])
   }
 
   def readSchema(sparkSession: SparkSession, files: Seq[FileStatus], options: Map[String, String])
@@ -88,7 +98,7 @@ object OrcUtils extends Logging {
     files.toIterator.map(file => readSchema(file.getPath, conf, ignoreCorruptFiles)).collectFirst {
       case Some(schema) =>
         logDebug(s"Reading schema from file $files, got Hive schema string: $schema")
-        CatalystSqlParser.parseDataType(schema.toString).asInstanceOf[StructType]
+        toCatalystSchema(schema)
     }
   }
 
@@ -97,8 +107,7 @@ object OrcUtils extends Logging {
       conf: Configuration,
       ignoreCorruptFiles: Boolean): Option[StructType] = {
     readSchema(file, conf, ignoreCorruptFiles) match {
-      case Some(schema) =>
-        Some(CatalystSqlParser.parseDataType(schema.toString).asInstanceOf[StructType])
+      case Some(schema) => Some(toCatalystSchema(schema))
 
       case None =>
         // Field names is empty or `FileFormatException` was thrown but ignoreCorruptFiles is true.
@@ -113,8 +122,7 @@ object OrcUtils extends Logging {
   def readOrcSchemasInParallel(
     files: Seq[FileStatus], conf: Configuration, ignoreCorruptFiles: Boolean): Seq[StructType] = {
     ThreadUtils.parmap(files, "readingOrcSchemas", 8) { currentFile =>
-      OrcUtils.readSchema(currentFile.getPath, conf, ignoreCorruptFiles)
-        .map(s => CatalystSqlParser.parseDataType(s.toString).asInstanceOf[StructType])
+      OrcUtils.readSchema(currentFile.getPath, conf, ignoreCorruptFiles).map(toCatalystSchema)
     }.flatten
   }
 
@@ -142,13 +150,18 @@ object OrcUtils extends Logging {
       reader: Reader,
       conf: Configuration): Option[(Array[Int], Boolean)] = {
     val orcFieldNames = reader.getSchema.getFieldNames.asScala
+    val forcePositionalEvolution = OrcConf.FORCE_POSITIONAL_EVOLUTION.getBoolean(conf)
     if (orcFieldNames.isEmpty) {
       // SPARK-8501: Some old empty ORC files always have an empty schema stored in their footer.
       None
     } else {
-      if (orcFieldNames.forall(_.startsWith("_col"))) {
-        // This is a ORC file written by Hive, no field names in the physical schema, assume the
-        // physical schema maps to the data scheme by index.
+      if (forcePositionalEvolution || orcFieldNames.forall(_.startsWith("_col"))) {
+        // This is either an ORC file written by an old version of Hive and there are no field
+        // names in the physical schema, or `orc.force.positional.evolution=true` is forced because
+        // the file was written by a newer version of Hive where
+        // `orc.force.positional.evolution=true` was set (possibly because columns were renamed so
+        // the physical schema doesn't match the data schema).
+        // In these cases we map the physical schema to the data schema by index.
         assert(orcFieldNames.length <= dataSchema.length, "The given data schema " +
           s"${dataSchema.catalogString} has less fields than the actual ORC physical schema, " +
           "no idea which columns were dropped, fail to read.")
@@ -184,8 +197,8 @@ object OrcUtils extends Logging {
                   // Need to fail if there is ambiguity, i.e. more than one field is matched.
                   val matchedOrcFieldsString = matchedOrcFields.mkString("[", ", ", "]")
                   reader.close()
-                  throw new RuntimeException(s"""Found duplicate field(s) "$requiredFieldName": """
-                    + s"$matchedOrcFieldsString in case-insensitive mode")
+                  throw QueryExecutionErrors.foundDuplicateFieldInCaseInsensitiveModeError(
+                    requiredFieldName, matchedOrcFieldsString)
                 } else {
                   idx
                 }
@@ -221,10 +234,16 @@ object OrcUtils extends Logging {
   }
 
   /**
-   * @return Returns the result schema string based on the canPruneCols flag.
-   *         resultSchemaString will be created using resultsSchema in case of
-   *         canPruneCols is true and for canPruneCols as false value
-   *         resultSchemaString will be created using the actual dataSchema.
+   * Returns the result schema to read from ORC file. In addition, It sets
+   * the schema string to 'orc.mapred.input.schema' so ORC reader can use later.
+   *
+   * @param canPruneCols Flag to decide whether pruned cols schema is send to resultSchema
+   *                     or to send the entire dataSchema to resultSchema.
+   * @param dataSchema   Schema of the orc files.
+   * @param resultSchema Result data schema created after pruning cols.
+   * @param partitionSchema Schema of partitions.
+   * @param conf Hadoop Configuration.
+   * @return Returns the result schema as string.
    */
   def orcResultSchemaString(
       canPruneCols: Boolean,

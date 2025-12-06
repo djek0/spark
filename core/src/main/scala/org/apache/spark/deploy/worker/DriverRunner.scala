@@ -163,7 +163,6 @@ private[deploy] class DriverRunner(
         driverDesc.jarUrl,
         driverDir,
         conf,
-        securityManager,
         SparkHadoopUtil.get.newConfiguration(conf),
         System.currentTimeMillis(),
         useCache = false)
@@ -197,9 +196,9 @@ private[deploy] class DriverRunner(
     val reverseProxy = conf.get(UI_REVERSE_PROXY)
     val workerUrlRef = UIUtils.makeHref(reverseProxy, driverId, workerWebUiUrl)
     builder.environment.put("SPARK_DRIVER_LOG_URL_STDOUT",
-      s"$workerUrlRef/logPage?driverId=$driverId&logType=stdout")
+      s"$workerUrlRef/logPage/?driverId=$driverId&logType=stdout")
     builder.environment.put("SPARK_DRIVER_LOG_URL_STDERR",
-      s"$workerUrlRef/logPage?driverId=$driverId&logType=stderr")
+      s"$workerUrlRef/logPage/?driverId=$driverId&logType=stderr")
 
     runDriver(builder, driverDir, driverDesc.supervise)
   }
@@ -212,7 +211,7 @@ private[deploy] class DriverRunner(
       CommandUtils.redirectStream(process.getInputStream, stdout)
 
       val stderr = new File(baseDir, "stderr")
-      val redactedCommand = Utils.redactCommandLineArgs(conf, builder.command.asScala)
+      val redactedCommand = Utils.redactCommandLineArgs(conf, builder.command.asScala.toSeq)
         .mkString("\"", "\" \"", "\"")
       val header = "Launch Command: %s\n%s\n\n".format(redactedCommand, "=" * 40)
       Files.append(header, stderr, StandardCharsets.UTF_8)
@@ -273,6 +272,6 @@ private[deploy] trait ProcessBuilderLike {
 private[deploy] object ProcessBuilderLike {
   def apply(processBuilder: ProcessBuilder): ProcessBuilderLike = new ProcessBuilderLike {
     override def start(): Process = processBuilder.start()
-    override def command: Seq[String] = processBuilder.command().asScala
+    override def command: Seq[String] = processBuilder.command().asScala.toSeq
   }
 }

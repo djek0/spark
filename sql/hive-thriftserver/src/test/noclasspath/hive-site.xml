@@ -24,7 +24,17 @@
       <description>Internal marker for test.</description>
   </property>
   <property>
+<<<<<<<< HEAD:sql/hive-thriftserver/src/test/noclasspath/hive-site.xml
     <name>hive.metastore.warehouse.dir</name>
     <value>/tmp/hive_one</value>
+========
+    <name>hadoop.tmp.dir</name>
+    <value>/tmp/hive_one</value>
+    <description>default is /tmp/hadoop-${user.name} and will be overridden </description>
+  </property>
+  <property>
+    <name>hadoop.this.is.a.test.key</name>
+    <value>2018-11-17 13:33:33.333</value>
+>>>>>>>> my-new-branch:sql/core/src/test/resources/hive-site.xml
   </property>
 </configuration>

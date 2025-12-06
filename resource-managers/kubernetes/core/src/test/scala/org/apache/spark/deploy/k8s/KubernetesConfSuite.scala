@@ -23,10 +23,20 @@ import org.apache.spark.{SparkConf, SparkFunSuite}
 import org.apache.spark.deploy.k8s.Config._
 import org.apache.spark.deploy.k8s.Constants._
 import org.apache.spark.deploy.k8s.submit._
+import org.apache.spark.resource.ResourceProfile.DEFAULT_RESOURCE_PROFILE_ID
 
 class KubernetesConfSuite extends SparkFunSuite {
 
   private val APP_ARGS = Array("arg1", "arg2")
+  private val CUSTOM_NODE_SELECTOR = Map(
+    "nodeSelectorKey1" -> "nodeSelectorValue1",
+    "nodeSelectorKey2" -> "nodeSelectorValue2")
+  private val CUSTOM_DRIVER_NODE_SELECTOR = Map(
+    "driverNodeSelectorKey1" -> "driverNodeSelectorValue1",
+    "driverNodeSelectorKey2" -> "driverNodeSelectorValue2")
+  private val CUSTOM_EXECUTOR_NODE_SELECTOR = Map(
+    "execNodeSelectorKey1" -> "execNodeSelectorValue1",
+    "execNodeSelectorKey2" -> "execNodeSelectorValue2")
   private val CUSTOM_LABELS = Map(
     "customLabel1Key" -> "customLabel1Value",
     "customLabel2Key" -> "customLabel2Value")
@@ -75,7 +85,8 @@ class KubernetesConfSuite extends SparkFunSuite {
       KubernetesTestConf.APP_ID,
       JavaMainAppResource(None),
       KubernetesTestConf.MAIN_CLASS,
-      APP_ARGS)
+      APP_ARGS,
+      None)
     assert(conf.labels === Map(
       SPARK_APP_ID_LABEL -> KubernetesTestConf.APP_ID,
       SPARK_ROLE_LABEL -> SPARK_POD_DRIVER_ROLE) ++
@@ -95,6 +106,17 @@ class KubernetesConfSuite extends SparkFunSuite {
       Some(DRIVER_POD))
     assert(conf.executorId === EXECUTOR_ID)
     assert(conf.driverPod.get === DRIVER_POD)
+    assert(conf.resourceProfileId === DEFAULT_RESOURCE_PROFILE_ID)
+  }
+
+  test("resource profile not default.") {
+    val conf = KubernetesConf.createExecutorConf(
+      new SparkConf(false),
+      EXECUTOR_ID,
+      KubernetesTestConf.APP_ID,
+      Some(DRIVER_POD),
+      10)
+    assert(conf.resourceProfileId === 10)
   }
 
   test("Image pull secrets.") {
@@ -133,7 +155,8 @@ class KubernetesConfSuite extends SparkFunSuite {
     assert(conf.labels === Map(
       SPARK_EXECUTOR_ID_LABEL -> EXECUTOR_ID,
       SPARK_APP_ID_LABEL -> KubernetesTestConf.APP_ID,
-      SPARK_ROLE_LABEL -> SPARK_POD_EXECUTOR_ROLE) ++ CUSTOM_LABELS)
+      SPARK_ROLE_LABEL -> SPARK_POD_EXECUTOR_ROLE,
+      SPARK_RESOURCE_PROFILE_ID_LABEL -> DEFAULT_RESOURCE_PROFILE_ID.toString) ++ CUSTOM_LABELS)
     assert(conf.annotations === CUSTOM_ANNOTATIONS)
     assert(conf.secretNamesToMountPaths === SECRET_NAMES_TO_MOUNT_PATHS)
     assert(conf.secretEnvNamesToKeyRefs === SECRET_ENV_VARS)
@@ -155,5 +178,24 @@ class KubernetesConfSuite extends SparkFunSuite {
         "executorEnvVars3_var3" -> "executorEnvVars3",
         "executorEnvVars4-var4" -> "executorEnvVars4",
         "executorEnvVars5-var5" -> "executorEnvVars5/var5"))
+  }
+
+  test("SPARK-36075: Set nodeSelector, driverNodeSelector, executorNodeSelect") {
+    val sparkConf = new SparkConf(false)
+    CUSTOM_NODE_SELECTOR.foreach { case (key, value) =>
+      sparkConf.set(s"$KUBERNETES_NODE_SELECTOR_PREFIX$key", value)
+    }
+    CUSTOM_DRIVER_NODE_SELECTOR.foreach { case (key, value) =>
+      sparkConf.set(s"$KUBERNETES_DRIVER_NODE_SELECTOR_PREFIX$key", value)
+    }
+    CUSTOM_EXECUTOR_NODE_SELECTOR.foreach { case (key, value) =>
+      sparkConf.set(s"$KUBERNETES_EXECUTOR_NODE_SELECTOR_PREFIX$key", value)
+    }
+    val execConf = KubernetesTestConf.createExecutorConf(sparkConf)
+    assert(execConf.nodeSelector === CUSTOM_NODE_SELECTOR)
+    assert(execConf.executorNodeSelector === CUSTOM_EXECUTOR_NODE_SELECTOR)
+    val driverConf = KubernetesTestConf.createDriverConf(sparkConf)
+    assert(driverConf.nodeSelector === CUSTOM_NODE_SELECTOR)
+    assert(driverConf.driverNodeSelector === CUSTOM_DRIVER_NODE_SELECTOR)
   }
 }

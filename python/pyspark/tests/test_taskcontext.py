@@ -25,9 +25,6 @@ import unittest
 from pyspark import SparkConf, SparkContext, TaskContext, BarrierTaskContext
 from pyspark.testing.utils import PySparkTestCase, SPARK_HOME, eventually
 
-if sys.version_info[0] >= 3:
-    xrange = range
-
 
 class TaskContextTests(PySparkTestCase):
 
@@ -82,7 +79,7 @@ class TaskContextTests(PySparkTestCase):
             partition_id = tc.partitionId()
             attempt_id = tc.taskAttemptId()
             if attempt_number == 0 and partition_id == 0:
-                raise Exception("Failing on first attempt")
+                raise RuntimeError("Failing on first attempt")
             else:
                 return [x, partition_id, attempt_number, attempt_id]
         result = rdd.map(fail_on_first).collect()
@@ -250,9 +247,9 @@ class TaskContextTestsWithWorkerReuse(unittest.TestCase):
     def check_task_context_correct_with_python_worker_reuse(self):
         """Verify the task context correct when reused python worker"""
         # start a normal job first to start all workers and get all worker pids
-        worker_pids = self.sc.parallelize(xrange(2), 2).map(lambda x: os.getpid()).collect()
+        worker_pids = self.sc.parallelize(range(2), 2).map(lambda x: os.getpid()).collect()
         # the worker will reuse in this barrier job
-        rdd = self.sc.parallelize(xrange(10), 2)
+        rdd = self.sc.parallelize(range(10), 2)
 
         def context(iterator):
             tp = TaskContext.get().partitionId()
@@ -304,6 +301,9 @@ class TaskContextTestsWithResources(unittest.TestCase):
         self.tempFile = tempfile.NamedTemporaryFile(delete=False)
         self.tempFile.write(b'echo {\\"name\\": \\"gpu\\", \\"addresses\\": [\\"0\\"]}')
         self.tempFile.close()
+        # create temporary directory for Worker resources coordination
+        self.tempdir = tempfile.NamedTemporaryFile(delete=False)
+        os.unlink(self.tempdir.name)
         os.chmod(self.tempFile.name, stat.S_IRWXU | stat.S_IXGRP | stat.S_IRGRP |
                  stat.S_IROTH | stat.S_IXOTH)
         conf = SparkConf().set("spark.test.home", SPARK_HOME)
@@ -328,10 +328,10 @@ class TaskContextTestsWithResources(unittest.TestCase):
 
 if __name__ == "__main__":
     import unittest
-    from pyspark.tests.test_taskcontext import *
+    from pyspark.tests.test_taskcontext import *  # noqa: F401
 
     try:
-        import xmlrunner
+        import xmlrunner  # type: ignore[import]
         testRunner = xmlrunner.XMLTestRunner(output='target/test-reports', verbosity=2)
     except ImportError:
         testRunner = None

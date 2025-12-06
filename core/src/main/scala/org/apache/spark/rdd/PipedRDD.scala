@@ -33,6 +33,7 @@ import scala.io.Source
 import scala.reflect.ClassTag
 
 import org.apache.spark.{Partition, TaskContext}
+import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.util.Utils
 
 
@@ -184,7 +185,7 @@ private[spark] class PipedRDD[T: ClassTag](
     new Iterator[String] {
       def next(): String = {
         if (!hasNext()) {
-          throw new NoSuchElementException()
+          throw SparkCoreErrors.noSuchElementException()
         }
         lines.next()
       }
@@ -238,7 +239,7 @@ private object PipedRDD {
     while(tok.hasMoreElements) {
       buf += tok.nextToken()
     }
-    buf
+    buf.toSeq
   }
 
   val STDIN_WRITER_THREAD_PREFIX = "stdin writer for"

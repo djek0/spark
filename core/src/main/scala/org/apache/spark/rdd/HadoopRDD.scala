@@ -36,6 +36,7 @@ import org.apache.spark._
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.deploy.SparkHadoopUtil
+import org.apache.spark.errors.SparkCoreErrors
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config._
 import org.apache.spark.rdd.HadoopRDD.HadoopMapPartitionsWithSplitRDD
@@ -81,7 +82,7 @@ private[spark] class HadoopPartition(rddId: Int, override val index: Int, s: Inp
  * @param sc The SparkContext to associate the RDD with.
  * @param broadcastedConf A general Hadoop Configuration, or a subclass of it. If the enclosed
  *   variable references an instance of JobConf, then that JobConf will be used for the Hadoop job.
- *   Otherwise, a new JobConf will be created on each slave using the enclosed Configuration.
+ *   Otherwise, a new JobConf will be created on each executor using the enclosed Configuration.
  * @param initLocalJobConfFuncOpt Optional closure used to initialize any JobConf that HadoopRDD
  *     creates.
  * @param inputFormatClass Storage format of the data to be read.
@@ -140,7 +141,7 @@ class HadoopRDD[K, V](
 
   private val ignoreEmptySplits = sparkContext.conf.get(HADOOP_RDD_IGNORE_EMPTY_SPLITS)
 
-  // Returns a JobConf that will be used on slaves to obtain input splits for Hadoop reads.
+  // Returns a JobConf that will be used on executors to obtain input splits for Hadoop reads.
   protected def getJobConf(): JobConf = {
     val conf: Configuration = broadcastedConf.value.value
     if (shouldCloneJobConf) {
@@ -232,6 +233,9 @@ class HadoopRDD[K, V](
         logWarning(s"${jobConf.get(FileInputFormat.INPUT_DIR)} doesn't exist and no" +
             s" partitions returned from this path.", e)
         Array.empty[Partition]
+      case e: IOException if e.getMessage.startsWith("Not a file:") =>
+        val path = e.getMessage.split(":").map(_.trim).apply(2)
+        throw SparkCoreErrors.pathNotSupportedError(path)
     }
   }
 

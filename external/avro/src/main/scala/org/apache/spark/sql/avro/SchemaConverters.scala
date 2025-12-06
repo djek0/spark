@@ -21,13 +21,13 @@ import scala.collection.JavaConverters._
 import scala.util.Random
 
 import org.apache.avro.{LogicalTypes, Schema, SchemaBuilder}
-import org.apache.avro.LogicalTypes.{Date, Decimal, TimestampMicros, TimestampMillis}
+import org.apache.avro.LogicalTypes.{Date, Decimal, LocalTimestampMicros, LocalTimestampMillis, TimestampMicros, TimestampMillis}
 import org.apache.avro.Schema.Type._
 
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.sql.catalyst.util.RandomUUIDGenerator
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.types.Decimal.{maxPrecisionForBytes, minBytesForPrecision}
+import org.apache.spark.sql.types.Decimal.minBytesForPrecision
 
 /**
  * This object contains method that are used to convert sparkSQL schemas to avro schemas and vice
@@ -74,6 +74,8 @@ object SchemaConverters {
       case FLOAT => SchemaType(FloatType, nullable = false)
       case LONG => avroSchema.getLogicalType match {
         case _: TimestampMillis | _: TimestampMicros => SchemaType(TimestampType, nullable = false)
+        case _: LocalTimestampMillis | _: LocalTimestampMicros =>
+          SchemaType(TimestampNTZType, nullable = false)
         case _ => SchemaType(LongType, nullable = false)
       }
 
@@ -94,7 +96,7 @@ object SchemaConverters {
           StructField(f.name, schemaType.dataType, schemaType.nullable)
         }
 
-        SchemaType(StructType(fields), nullable = false)
+        SchemaType(StructType(fields.toSeq), nullable = false)
 
       case ARRAY =>
         val schemaType = toSqlTypeHelper(avroSchema.getElementType, existingRecordNames)
@@ -118,7 +120,7 @@ object SchemaConverters {
             toSqlTypeHelper(Schema.createUnion(remainingUnionTypes.asJava), existingRecordNames)
               .copy(nullable = true)
           }
-        } else avroSchema.getTypes.asScala.map(_.getType) match {
+        } else avroSchema.getTypes.asScala.map(_.getType).toSeq match {
           case Seq(t1) =>
             toSqlTypeHelper(avroSchema.getTypes.get(0), existingRecordNames)
           case Seq(t1, t2) if Set(t1, t2) == Set(INT, LONG) =>
@@ -135,7 +137,7 @@ object SchemaConverters {
                 StructField(s"member$i", schemaType.dataType, nullable = true)
             }
 
-            SchemaType(StructType(fields), nullable = false)
+            SchemaType(StructType(fields.toSeq), nullable = false)
         }
 
       case other => throw new IncompatibleSchemaException(s"Unsupported type $other")
@@ -163,6 +165,8 @@ object SchemaConverters {
         LogicalTypes.date().addToSchema(builder.intType())
       case TimestampType =>
         LogicalTypes.timestampMicros().addToSchema(builder.longType())
+      case TimestampNTZType =>
+        LogicalTypes.localTimestampMicros().addToSchema(builder.longType())
 
       case FloatType => builder.floatType()
       case DoubleType => builder.doubleType()
@@ -208,3 +212,5 @@ object SchemaConverters {
 
 private[avro] class IncompatibleSchemaException(
   msg: String, ex: Throwable = null) extends Exception(msg, ex)
+
+private[avro] class UnsupportedAvroTypeException(msg: String) extends Exception(msg)

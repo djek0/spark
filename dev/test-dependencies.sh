@@ -17,7 +17,7 @@
 # limitations under the License.
 #
 
-set -e
+set -ex
 
 FWDIR="$(cd "`dirname $0`"/..; pwd)"
 cd "$FWDIR"
@@ -29,10 +29,9 @@ export LC_ALL=C
 # TODO: This would be much nicer to do in SBT, once SBT supports Maven-style resolution.
 
 # NOTE: These should match those in the release publishing script
-HADOOP2_MODULE_PROFILES="-Phive-thriftserver -Pmesos -Pkubernetes -Pyarn -Phive"
+HADOOP_MODULE_PROFILES="-Phive-thriftserver -Pmesos -Pkubernetes -Pyarn -Phive"
 MVN="build/mvn"
 HADOOP_HIVE_PROFILES=(
-    hadoop-2.7-hive-1.2
     hadoop-2.7-hive-2.3
     hadoop-3.2-hive-2.3
 )
@@ -52,8 +51,18 @@ if [ $? != 0 ]; then
     echo -e "Error while getting version string from Maven:\n$OLD_VERSION"
     exit 1
 fi
+SCALA_BINARY_VERSION=$($MVN -q \
+    -Dexec.executable="echo" \
+    -Dexec.args='${scala.binary.version}' \
+    --non-recursive \
+    org.codehaus.mojo:exec-maven-plugin:1.6.0:exec | grep -E '[0-9]+\.[0-9]+')
+if [[ "$SCALA_BINARY_VERSION" != "2.12" ]]; then
+  # TODO(SPARK-36168) Support Scala 2.13 in dev/test-dependencies.sh
+  echo "Skip dependency testing on $SCALA_BINARY_VERSION"
+  exit 0
+fi
 set -e
-TEMP_VERSION="spark-$(python -S -c "import random; print(random.randrange(100000, 999999))")"
+TEMP_VERSION="spark-$(python3 -S -c "import random; print(random.randrange(100000, 999999))")"
 
 function reset_version {
   # Delete the temporary POMs that we wrote to the local Maven repo:
@@ -71,22 +80,19 @@ for HADOOP_HIVE_PROFILE in "${HADOOP_HIVE_PROFILES[@]}"; do
   if [[ $HADOOP_HIVE_PROFILE == **hadoop-3.2-hive-2.3** ]]; then
     HADOOP_PROFILE=hadoop-3.2
     HIVE_PROFILE=hive-2.3
-  elif [[ $HADOOP_HIVE_PROFILE == **hadoop-2.7-hive-2.3** ]]; then
-    HADOOP_PROFILE=hadoop-2.7
-    HIVE_PROFILE=hive-2.3
   else
     HADOOP_PROFILE=hadoop-2.7
-    HIVE_PROFILE=hive-1.2
+    HIVE_PROFILE=hive-2.3
   fi
   echo "Performing Maven install for $HADOOP_HIVE_PROFILE"
-  $MVN $HADOOP2_MODULE_PROFILES -P$HADOOP_PROFILE -P$HIVE_PROFILE jar:jar jar:test-jar install:install clean -q
+  $MVN $HADOOP_MODULE_PROFILES -P$HADOOP_PROFILE -P$HIVE_PROFILE jar:jar jar:test-jar install:install clean -q
 
   echo "Performing Maven validate for $HADOOP_HIVE_PROFILE"
-  $MVN $HADOOP2_MODULE_PROFILES -P$HADOOP_PROFILE -P$HIVE_PROFILE validate -q
+  $MVN $HADOOP_MODULE_PROFILES -P$HADOOP_PROFILE -P$HIVE_PROFILE validate -q
 
   echo "Generating dependency manifest for $HADOOP_HIVE_PROFILE"
   mkdir -p dev/pr-deps
-  $MVN $HADOOP2_MODULE_PROFILES -P$HADOOP_PROFILE -P$HIVE_PROFILE dependency:build-classpath -pl assembly -am \
+  $MVN $HADOOP_MODULE_PROFILES -P$HADOOP_PROFILE -P$HIVE_PROFILE dependency:build-classpath -pl assembly -am \
     | grep "Dependencies classpath:" -A 1 \
     | tail -n 1 | tr ":" "\n" | awk -F '/' '{
       # For each dependency classpath, we fetch the last three parts split by "/": artifact id, version, and jar name.

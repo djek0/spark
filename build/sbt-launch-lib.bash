@@ -17,7 +17,7 @@ declare -a java_args
 declare -a scalac_args
 declare -a sbt_commands
 declare -a maven_profiles
-declare sbt_default_mem=2048
+declare sbt_default_mem=4096
 
 if test -x "$JAVA_HOME/bin/java"; then
     echo -e "Using $JAVA_HOME as default JAVA_HOME."
@@ -39,7 +39,11 @@ dlog () {
 
 acquire_sbt_jar () {
   SBT_VERSION=`awk -F "=" '/sbt\.version/ {print $2}' ./project/build.properties`
-  URL1=https://dl.bintray.com/typesafe/ivy-releases/org.scala-sbt/sbt-launch/${SBT_VERSION}/sbt-launch.jar
+  # DEFAULT_ARTIFACT_REPOSITORY env variable can be used to only fetch
+  # artifacts from internal repos only.
+  # Ex:
+  #   DEFAULT_ARTIFACT_REPOSITORY=https://artifacts.internal.com/libs-release/
+  URL1=${DEFAULT_ARTIFACT_REPOSITORY:-https://repo1.maven.org/maven2/}org/scala-sbt/sbt-launch/${SBT_VERSION}/sbt-launch-${SBT_VERSION}.jar
   JAR=build/sbt-launch-${SBT_VERSION}.jar
 
   sbt_jar=$JAR
@@ -113,11 +117,9 @@ addDebugger () {
 # so they need not be dicked around with individually.
 get_mem_opts () {
   local mem=${1:-$sbt_default_mem}
-  local codecache=$(( $mem / 8 ))
-  (( $codecache > 128 )) || codecache=128
-  (( $codecache < 2048 )) || codecache=2048
+  local codecache=128
 
-  echo "-Xms${mem}m -Xmx${mem}m -XX:ReservedCodeCacheSize=${codecache}m"
+  echo "-Xms256m -Xmx${mem}m -XX:ReservedCodeCacheSize=${codecache}m"
 }
 
 require_arg () {

@@ -221,7 +221,7 @@ The complete code can be found in the Spark Streaming example
 
 </div>
 <div data-lang="python"  markdown="1" >
-First, we import [StreamingContext](api/python/pyspark.streaming.html#pyspark.streaming.StreamingContext), which is the main entry point for all streaming functionality. We create a local StreamingContext with two execution threads, and batch interval of 1 second.
+First, we import [StreamingContext](api/python/reference/api/pyspark.streaming.StreamingContext.html#pyspark.streaming.StreamingContext), which is the main entry point for all streaming functionality. We create a local StreamingContext with two execution threads, and batch interval of 1 second.
 
 {% highlight python %}
 from pyspark import SparkContext
@@ -503,7 +503,7 @@ JavaStreamingContext ssc = new JavaStreamingContext(sc, Durations.seconds(1));
 </div>
 <div data-lang="python" markdown="1">
 
-A [StreamingContext](api/python/pyspark.streaming.html#pyspark.streaming.StreamingContext) object can be created from a [SparkContext](api/python/pyspark.html#pyspark.SparkContext) object.
+A [StreamingContext](api/python/reference/api/pyspark.streaming.StreamingContext.html#pyspark.streaming.StreamingContext) object can be created from a [SparkContext](api/python/reference/api/pyspark.SparkContext.html#pyspark.SparkContext) object.
 
 {% highlight python %}
 from pyspark import SparkContext
@@ -741,7 +741,7 @@ For testing a Spark Streaming application with test data, one can also create a 
 For more details on streams from sockets and files, see the API documentations of the relevant functions in
 [StreamingContext](api/scala/org/apache/spark/streaming/StreamingContext.html) for
 Scala, [JavaStreamingContext](api/java/index.html?org/apache/spark/streaming/api/java/JavaStreamingContext.html)
-for Java, and [StreamingContext](api/python/pyspark.streaming.html#pyspark.streaming.StreamingContext) for Python.
+for Java, and [StreamingContext](api/python/reference/api/pyspark.streaming.StreamingContext.html#pyspark.streaming.StreamingContext) for Python.
 
 ### Advanced Sources
 {:.no_toc}
@@ -1223,7 +1223,7 @@ see [DStream](api/scala/org/apache/spark/streaming/dstream/DStream.html)
 and [PairDStreamFunctions](api/scala/org/apache/spark/streaming/dstream/PairDStreamFunctions.html).
 For the Java API, see [JavaDStream](api/java/index.html?org/apache/spark/streaming/api/java/JavaDStream.html)
 and [JavaPairDStream](api/java/index.html?org/apache/spark/streaming/api/java/JavaPairDStream.html).
-For the Python API, see [DStream](api/python/pyspark.streaming.html#pyspark.streaming.DStream).
+For the Python API, see [DStream](api/python/reference/api/pyspark.streaming.DStream.html#pyspark.streaming.DStream).
 
 ***
 
@@ -1822,7 +1822,7 @@ This is shown in the following example.
 <div data-lang="scala" markdown="1">
 {% highlight scala %}
 
-object WordBlacklist {
+object WordExcludeList {
 
   @volatile private var instance: Broadcast[Seq[String]] = null
 
@@ -1830,8 +1830,8 @@ object WordBlacklist {
     if (instance == null) {
       synchronized {
         if (instance == null) {
-          val wordBlacklist = Seq("a", "b", "c")
-          instance = sc.broadcast(wordBlacklist)
+          val wordExcludeList = Seq("a", "b", "c")
+          instance = sc.broadcast(wordExcludeList)
         }
       }
     }
@@ -1847,7 +1847,7 @@ object DroppedWordsCounter {
     if (instance == null) {
       synchronized {
         if (instance == null) {
-          instance = sc.longAccumulator("WordsInBlacklistCounter")
+          instance = sc.longAccumulator("DroppedWordsCounter")
         }
       }
     }
@@ -1856,13 +1856,13 @@ object DroppedWordsCounter {
 }
 
 wordCounts.foreachRDD { (rdd: RDD[(String, Int)], time: Time) =>
-  // Get or register the blacklist Broadcast
-  val blacklist = WordBlacklist.getInstance(rdd.sparkContext)
+  // Get or register the excludeList Broadcast
+  val excludeList = WordExcludeList.getInstance(rdd.sparkContext)
   // Get or register the droppedWordsCounter Accumulator
   val droppedWordsCounter = DroppedWordsCounter.getInstance(rdd.sparkContext)
-  // Use blacklist to drop words and use droppedWordsCounter to count them
+  // Use excludeList to drop words and use droppedWordsCounter to count them
   val counts = rdd.filter { case (word, count) =>
-    if (blacklist.value.contains(word)) {
+    if (excludeList.value.contains(word)) {
       droppedWordsCounter.add(count)
       false
     } else {
@@ -1879,16 +1879,16 @@ See the full [source code]({{site.SPARK_GITHUB_URL}}/blob/v{{site.SPARK_VERSION_
 <div data-lang="java" markdown="1">
 {% highlight java %}
 
-class JavaWordBlacklist {
+class JavaWordExcludeList {
 
   private static volatile Broadcast<List<String>> instance = null;
 
   public static Broadcast<List<String>> getInstance(JavaSparkContext jsc) {
     if (instance == null) {
-      synchronized (JavaWordBlacklist.class) {
+      synchronized (JavaWordExcludeList.class) {
         if (instance == null) {
-          List<String> wordBlacklist = Arrays.asList("a", "b", "c");
-          instance = jsc.broadcast(wordBlacklist);
+          List<String> wordExcludeList = Arrays.asList("a", "b", "c");
+          instance = jsc.broadcast(wordExcludeList);
         }
       }
     }
@@ -1904,7 +1904,7 @@ class JavaDroppedWordsCounter {
     if (instance == null) {
       synchronized (JavaDroppedWordsCounter.class) {
         if (instance == null) {
-          instance = jsc.sc().longAccumulator("WordsInBlacklistCounter");
+          instance = jsc.sc().longAccumulator("DroppedWordsCounter");
         }
       }
     }
@@ -1913,13 +1913,13 @@ class JavaDroppedWordsCounter {
 }
 
 wordCounts.foreachRDD((rdd, time) -> {
-  // Get or register the blacklist Broadcast
-  Broadcast<List<String>> blacklist = JavaWordBlacklist.getInstance(new JavaSparkContext(rdd.context()));
+  // Get or register the excludeList Broadcast
+  Broadcast<List<String>> excludeList = JavaWordExcludeList.getInstance(new JavaSparkContext(rdd.context()));
   // Get or register the droppedWordsCounter Accumulator
   LongAccumulator droppedWordsCounter = JavaDroppedWordsCounter.getInstance(new JavaSparkContext(rdd.context()));
-  // Use blacklist to drop words and use droppedWordsCounter to count them
+  // Use excludeList to drop words and use droppedWordsCounter to count them
   String counts = rdd.filter(wordCount -> {
-    if (blacklist.value().contains(wordCount._1())) {
+    if (excludeList.value().contains(wordCount._1())) {
       droppedWordsCounter.add(wordCount._2());
       return false;
     } else {
@@ -1935,10 +1935,10 @@ See the full [source code]({{site.SPARK_GITHUB_URL}}/blob/v{{site.SPARK_VERSION_
 </div>
 <div data-lang="python" markdown="1">
 {% highlight python %}
-def getWordBlacklist(sparkContext):
-    if ("wordBlacklist" not in globals()):
-        globals()["wordBlacklist"] = sparkContext.broadcast(["a", "b", "c"])
-    return globals()["wordBlacklist"]
+def getWordExcludeList(sparkContext):
+    if ("wordExcludeList" not in globals()):
+        globals()["wordExcludeList"] = sparkContext.broadcast(["a", "b", "c"])
+    return globals()["wordExcludeList"]
 
 def getDroppedWordsCounter(sparkContext):
     if ("droppedWordsCounter" not in globals()):
@@ -1946,14 +1946,14 @@ def getDroppedWordsCounter(sparkContext):
     return globals()["droppedWordsCounter"]
 
 def echo(time, rdd):
-    # Get or register the blacklist Broadcast
-    blacklist = getWordBlacklist(rdd.context)
+    # Get or register the excludeList Broadcast
+    excludeList = getWordExcludeList(rdd.context)
     # Get or register the droppedWordsCounter Accumulator
     droppedWordsCounter = getDroppedWordsCounter(rdd.context)
 
-    # Use blacklist to drop words and use droppedWordsCounter to count them
+    # Use excludeList to drop words and use droppedWordsCounter to count them
     def filterFunc(wordCount):
-        if wordCount[0] in blacklist.value:
+        if wordCount[0] in excludeList.value:
             droppedWordsCounter.add(wordCount[1])
             False
         else:
@@ -2216,7 +2216,7 @@ In specific cases where the amount of data that needs to be retained for the str
 ### Task Launching Overheads
 {:.no_toc}
 If the number of tasks launched per second is high (say, 50 or more per second), then the overhead
-of sending out tasks to the slaves may be significant and will make it hard to achieve sub-second
+of sending out tasks to the executors may be significant and will make it hard to achieve sub-second
 latencies. The overhead can be reduced by the following changes:
 
 * **Execution mode**: Running Spark in Standalone mode or coarse-grained Mesos mode leads to
@@ -2496,8 +2496,7 @@ additional effort may be necessary to achieve exactly-once semantics. There are 
     * [KafkaUtils](api/java/index.html?org/apache/spark/streaming/kafka/KafkaUtils.html),
     [KinesisUtils](api/java/index.html?org/apache/spark/streaming/kinesis/KinesisInputDStream.html)
   - Python docs
-    * [StreamingContext](api/python/pyspark.streaming.html#pyspark.streaming.StreamingContext) and [DStream](api/python/pyspark.streaming.html#pyspark.streaming.DStream)
-    * [KafkaUtils](api/python/pyspark.streaming.html#pyspark.streaming.kafka.KafkaUtils)
+    * [StreamingContext](api/python/reference/api/pyspark.streaming.StreamingContext.html#pyspark.streaming.StreamingContext) and [DStream](api/python/reference/api/pyspark.streaming.DStream.html#pyspark.streaming.DStream)
 
 * More examples in [Scala]({{site.SPARK_GITHUB_URL}}/tree/master/examples/src/main/scala/org/apache/spark/examples/streaming)
   and [Java]({{site.SPARK_GITHUB_URL}}/tree/master/examples/src/main/java/org/apache/spark/examples/streaming)

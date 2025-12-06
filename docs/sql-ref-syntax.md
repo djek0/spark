@@ -70,6 +70,7 @@ Spark SQL is Apache Spark's module for working with structured data. The SQL Syn
    * [CASE Clause](sql-ref-syntax-qry-select-case.html)
    * [PIVOT Clause](sql-ref-syntax-qry-select-pivot.html)
    * [LATERAL VIEW Clause](sql-ref-syntax-qry-select-lateral-view.html)
+   * [TRANSFORM Clause](sql-ref-syntax-qry-select-transform.html)
  * [EXPLAIN](sql-ref-syntax-qry-explain.html)
 
 ### Auxiliary Statements
@@ -77,6 +78,7 @@ Spark SQL is Apache Spark's module for working with structured data. The SQL Syn
  * [ADD FILE](sql-ref-syntax-aux-resource-mgmt-add-file.html)
  * [ADD JAR](sql-ref-syntax-aux-resource-mgmt-add-jar.html)
  * [ANALYZE TABLE](sql-ref-syntax-aux-analyze-table.html)
+ * [ANALYZE TABLES](sql-ref-syntax-aux-analyze-tables.html)
  * [CACHE TABLE](sql-ref-syntax-aux-cache-cache-table.html)
  * [CLEAR CACHE](sql-ref-syntax-aux-cache-clear-cache.html)
  * [DESCRIBE DATABASE](sql-ref-syntax-aux-describe-database.html)
@@ -87,6 +89,7 @@ Spark SQL is Apache Spark's module for working with structured data. The SQL Syn
  * [LIST JAR](sql-ref-syntax-aux-resource-mgmt-list-jar.html)
  * [REFRESH](sql-ref-syntax-aux-cache-refresh.html)
  * [REFRESH TABLE](sql-ref-syntax-aux-cache-refresh-table.html)
+ * [REFRESH FUNCTION](sql-ref-syntax-aux-cache-refresh-function.html)
  * [RESET](sql-ref-syntax-aux-conf-mgmt-reset.html)
  * [SET](sql-ref-syntax-aux-conf-mgmt-set.html)
  * [SHOW COLUMNS](sql-ref-syntax-aux-show-columns.html)

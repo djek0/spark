@@ -64,13 +64,13 @@ private[spark] object StratifiedSamplingUtils extends Logging {
       counts: Option[Map[K, Long]],
       seed: Long): mutable.Map[K, AcceptanceResult] = {
     val combOp = getCombOp[K]
-    val mappedPartitionRDD = rdd.mapPartitionsWithIndex { case (partition, iter) =>
+    val mappedPartitionRDD = rdd.mapPartitionsWithIndex({ case (partition, iter) =>
       val zeroU: mutable.Map[K, AcceptanceResult] = new mutable.HashMap[K, AcceptanceResult]()
       val rng = new RandomDataGenerator()
       rng.reSeed(seed + partition)
       val seqOp = getSeqOp(withReplacement, fractions, rng, counts)
       Iterator(iter.aggregate(zeroU)(seqOp, combOp))
-    }
+    }, preservesPartitioning = false)
     mappedPartitionRDD.reduce(combOp)
   }
 

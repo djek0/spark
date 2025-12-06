@@ -50,10 +50,43 @@ sealed trait TimestampFormatter extends Serializable {
   @throws(classOf[DateTimeException])
   def parse(s: String): Long
 
+  /**
+   * Parses a timestamp in a string and converts it to microseconds since Unix Epoch in local time.
+   *
+   * @param s - string with timestamp to parse
+   * @return microseconds since epoch.
+   * @throws ParseException can be thrown by legacy parser
+   * @throws DateTimeParseException can be thrown by new parser
+   * @throws DateTimeException unable to obtain local date or time
+   * @throws IllegalStateException The formatter for timestamp without time zone should always
+   *                               implement this method. The exception should never be hit.
+   */
+  @throws(classOf[ParseException])
+  @throws(classOf[DateTimeParseException])
+  @throws(classOf[DateTimeException])
+  @throws(classOf[IllegalStateException])
+  def parseWithoutTimeZone(s: String): Long =
+    throw new IllegalStateException(
+      s"The method `parseWithoutTimeZone(s: String)` should be implemented in the formatter " +
+        "of timestamp without time zone")
+
   def format(us: Long): String
   def format(ts: Timestamp): String
   def format(instant: Instant): String
-  def validatePatternString(): Unit
+
+  @throws(classOf[IllegalStateException])
+  def format(localDateTime: LocalDateTime): String =
+    throw new IllegalStateException(
+      s"The method `format(localDateTime: LocalDateTime)` should be implemented in the formatter " +
+        "of timestamp without time zone")
+
+  /**
+   * Validates the pattern string.
+   * @param checkLegacy  if true and the pattern is invalid, check whether the pattern is valid for
+   *                     legacy formatters and show hints for using legacy formatter.
+   *                     Otherwise, simply check the pattern string.
+   */
+  def validatePatternString(checkLegacy: Boolean): Unit
 }
 
 class Iso8601TimestampFormatter(
@@ -72,19 +105,25 @@ class Iso8601TimestampFormatter(
     pattern, zoneId, locale, legacyFormat)
 
   override def parse(s: String): Long = {
-    val specialDate = convertSpecialTimestamp(s.trim, zoneId)
-    specialDate.getOrElse {
-      try {
-        val parsed = formatter.parse(s)
-        val parsedZoneId = parsed.query(TemporalQueries.zone())
-        val timeZoneId = if (parsedZoneId == null) zoneId else parsedZoneId
-        val zonedDateTime = toZonedDateTime(parsed, timeZoneId)
-        val epochSeconds = zonedDateTime.toEpochSecond
-        val microsOfSecond = zonedDateTime.get(MICRO_OF_SECOND)
+    try {
+      val parsed = formatter.parse(s)
+      val parsedZoneId = parsed.query(TemporalQueries.zone())
+      val timeZoneId = if (parsedZoneId == null) zoneId else parsedZoneId
+      val zonedDateTime = toZonedDateTime(parsed, timeZoneId)
+      val epochSeconds = zonedDateTime.toEpochSecond
+      val microsOfSecond = zonedDateTime.get(MICRO_OF_SECOND)
 
-        Math.addExact(Math.multiplyExact(epochSeconds, MICROS_PER_SECOND), microsOfSecond)
-      } catch checkParsedDiff(s, legacyFormatter.parse)
-    }
+      Math.addExact(Math.multiplyExact(epochSeconds, MICROS_PER_SECOND), microsOfSecond)
+    } catch checkParsedDiff(s, legacyFormatter.parse)
+  }
+
+  override def parseWithoutTimeZone(s: String): Long = {
+    try {
+      val parsed = formatter.parse(s)
+      val localDate = toLocalDate(parsed)
+      val localTime = toLocalTime(parsed)
+      DateTimeUtils.localDateTimeToMicros(LocalDateTime.of(localDate, localTime))
+    } catch checkParsedDiff(s, legacyFormatter.parse)
   }
 
   override def format(instant: Instant): String = {
@@ -103,10 +142,21 @@ class Iso8601TimestampFormatter(
     legacyFormatter.format(ts)
   }
 
-  override def validatePatternString(): Unit = {
-    try {
-      formatter
-    } catch checkLegacyFormatter(pattern, legacyFormatter.validatePatternString)
+  override def format(localDateTime: LocalDateTime): String = {
+    localDateTime.format(formatter)
+  }
+
+  override def validatePatternString(checkLegacy: Boolean): Unit = {
+    if (checkLegacy) {
+      try {
+        formatter
+      } catch checkLegacyFormatter(pattern,
+        legacyFormatter.validatePatternString(checkLegacy = true))
+    } else {
+      try {
+        formatter
+      } catch checkInvalidPattern(pattern)
+    }
   }
 }
 
@@ -130,16 +180,37 @@ class FractionTimestampFormatter(zoneId: ZoneId)
   override protected lazy val formatter = DateTimeFormatterHelper.fractionFormatter
 
   // The new formatter will omit the trailing 0 in the timestamp string, but the legacy formatter
-  // can't. Here we borrow the code from Spark 2.4 DateTimeUtils.timestampToString to omit the
-  // trailing 0 for the legacy formatter as well.
+  // can't. Here we use the legacy formatter to format the given timestamp up to seconds fractions,
+  // and custom implementation to format the fractional part without trailing zeros.
   override def format(ts: Timestamp): String = {
-    val timestampString = ts.toString
     val formatted = legacyFormatter.format(ts)
-
-    if (timestampString.length > 19 && timestampString.substring(19) != ".0") {
-      formatted + timestampString.substring(19)
-    } else {
+    var nanos = ts.getNanos
+    if (nanos == 0) {
       formatted
+    } else {
+      // Formats non-zero seconds fraction w/o trailing zeros. For example:
+      //   formatted = '2020-05:27 15:55:30'
+      //   nanos = 001234000
+      // Counts the length of the fractional part: 001234000 -> 6
+      var fracLen = 9
+      while (nanos % 10 == 0) {
+        nanos /= 10
+        fracLen -= 1
+      }
+      // Places `nanos` = 1234 after '2020-05:27 15:55:30.'
+      val fracOffset = formatted.length + 1
+      val totalLen = fracOffset + fracLen
+      // The buffer for the final result: '2020-05:27 15:55:30.001234'
+      val buf = new Array[Char](totalLen)
+      formatted.getChars(0, formatted.length, buf, 0)
+      buf(formatted.length) = '.'
+      var i = totalLen
+      do {
+        i -= 1
+        buf(i) = ('0' + (nanos % 10)).toChar
+        nanos /= 10
+      } while (i > fracOffset)
+      new String(buf)
     }
   }
 }
@@ -158,7 +229,7 @@ class MicrosCalendar(tz: TimeZone, digitsInFraction: Int)
   // Converts parsed `MILLISECOND` field to seconds fraction in microsecond precision.
   // For example if the fraction pattern is `SSSS` then `digitsInFraction` = 4, and
   // if the `MILLISECOND` field was parsed to `1234`.
-  def getMicros(): SQLTimestamp = {
+  def getMicros(): Long = {
     // Append 6 zeros to the field: 1234 -> 1234000000
     val d = fields(Calendar.MILLISECOND) * MICROS_PER_SECOND
     // Take the first 6 digits from `d`: 1234000000 -> 123400
@@ -187,18 +258,18 @@ class LegacyFastTimestampFormatter(
     fastDateFormat.getTimeZone,
     fastDateFormat.getPattern.count(_ == 'S'))
 
-  override def parse(s: String): SQLTimestamp = {
+  override def parse(s: String): Long = {
     cal.clear() // Clear the calendar because it can be re-used many times
     if (!fastDateFormat.parse(s, new ParsePosition(0), cal)) {
       throw new IllegalArgumentException(s"'$s' is an invalid timestamp")
     }
     val micros = cal.getMicros()
     cal.set(Calendar.MILLISECOND, 0)
-    val julianMicros = Math.addExact(fromMillis(cal.getTimeInMillis), micros)
+    val julianMicros = Math.addExact(millisToMicros(cal.getTimeInMillis), micros)
     rebaseJulianToGregorianMicros(julianMicros)
   }
 
-  override def format(timestamp: SQLTimestamp): String = {
+  override def format(timestamp: Long): String = {
     val julianMicros = rebaseGregorianToJulianMicros(timestamp)
     cal.setTimeInMillis(Math.floorDiv(julianMicros, MICROS_PER_SECOND) * MILLIS_PER_SECOND)
     cal.setMicros(Math.floorMod(julianMicros, MICROS_PER_SECOND))
@@ -217,7 +288,7 @@ class LegacyFastTimestampFormatter(
     format(instantToMicros(instant))
   }
 
-  override def validatePatternString(): Unit = fastDateFormat
+  override def validatePatternString(checkLegacy: Boolean): Unit = fastDateFormat
 }
 
 class LegacySimpleTimestampFormatter(
@@ -248,7 +319,7 @@ class LegacySimpleTimestampFormatter(
     format(instantToMicros(instant))
   }
 
-  override def validatePatternString(): Unit = sdf
+  override def validatePatternString(checkLegacy: Boolean): Unit = sdf
 }
 
 object LegacyDateFormats extends Enumeration {
@@ -268,16 +339,17 @@ object TimestampFormatter {
       zoneId: ZoneId,
       locale: Locale = defaultLocale,
       legacyFormat: LegacyDateFormat = LENIENT_SIMPLE_DATE_FORMAT,
-      isParsing: Boolean): TimestampFormatter = {
+      isParsing: Boolean,
+      forTimestampNTZ: Boolean = false): TimestampFormatter = {
     val pattern = format.getOrElse(defaultPattern)
-    if (SQLConf.get.legacyTimeParserPolicy == LEGACY) {
+    val formatter = if (SQLConf.get.legacyTimeParserPolicy == LEGACY && !forTimestampNTZ) {
       getLegacyFormatter(pattern, zoneId, locale, legacyFormat)
     } else {
-      val tf = new Iso8601TimestampFormatter(
+      new Iso8601TimestampFormatter(
         pattern, zoneId, locale, legacyFormat, isParsing)
-      tf.validatePatternString()
-      tf
     }
+    formatter.validatePatternString(checkLegacy = !forTimestampNTZ)
+    formatter
   }
 
   def getLegacyFormatter(
@@ -310,6 +382,16 @@ object TimestampFormatter {
       legacyFormat: LegacyDateFormat,
       isParsing: Boolean): TimestampFormatter = {
     getFormatter(Some(format), zoneId, defaultLocale, legacyFormat, isParsing)
+  }
+
+  def apply(
+      format: String,
+      zoneId: ZoneId,
+      legacyFormat: LegacyDateFormat,
+      isParsing: Boolean,
+      forTimestampNTZ: Boolean): TimestampFormatter = {
+    getFormatter(Some(format), zoneId, defaultLocale, legacyFormat, isParsing,
+      forTimestampNTZ)
   }
 
   def apply(
