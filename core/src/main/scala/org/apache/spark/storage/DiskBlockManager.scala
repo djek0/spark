@@ -246,7 +246,7 @@ private[spark] class DiskBlockManager(conf: SparkConf, var deleteFilesOnStop: Bo
    */
   def createDirWithPermission770(dirToCreate: File): Unit = {
     var attempts = 0
-    val maxAttempts = Utils.MAX_DIR_CREATION_ATTEMPTS
+    val maxAttempts = 10  // Same as Utils.MAX_DIR_CREATION_ATTEMPTS
     var created: File = null
     while (created == null) {
       attempts += 1
