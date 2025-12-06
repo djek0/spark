@@ -276,7 +276,7 @@ private[spark] class DAGScheduler(
 
   def canEndPartitionForResultStage(partitionId: Int): Boolean={
     val count = partitionPerResultStage.getOrElse(partitionId, 0)
-    println(s"[DEBUG-HELPER] canEndPartitionForResultStage: partitionId=${partitionId}, count=${count}, result=${count >= 2}")
+    logDebug(s"Checking partition completion: partitionId=$partitionId, count=$count, canEnd=${count >= 2}")
     if (partitionPerResultStage.contains(partitionId))
       return (partitionPerResultStage(partitionId) >= 2)
 
@@ -287,9 +287,9 @@ private[spark] class DAGScheduler(
   def canMarkStageAsFinished(stage_id: Int): Boolean = {
     val totalTasks = taskPerStage.getOrElse(stage_id, 0)
     val completedTasks = completedTasksPerStage.getOrElse(stage_id, 0)
-    println(s"[DEBUG-HELPER] canMarkStageAsFinished: stageId=${stage_id}, totalTasks=${totalTasks}, completedTasks=${completedTasks}")
+    logDebug(s"Checking stage completion: stageId=$stage_id, totalTasks=$totalTasks, completedTasks=$completedTasks")
     if(taskPerStage.contains(stage_id) && completedTasksPerStage.contains(stage_id)){
-      println(s"[EXTRA LOG][DAG] tasks: ${taskPerStage(stage_id)}, completed ${completedTasksPerStage(stage_id)}")
+      logDebug(s"Stage $stage_id: ${taskPerStage(stage_id)} total tasks, ${completedTasksPerStage(stage_id)} completed")
       return (taskPerStage(stage_id) == completedTasksPerStage(stage_id))
     }
     false
@@ -1310,16 +1310,16 @@ private[spark] class DAGScheduler(
 
     val tasks: Seq[Task[_]] = try {
       val serializedTaskMetrics = closureSerializer.serialize(stage.latestInfo.taskMetrics).array()
-      logInfo(s"[TASK CREATION] Starting task creation for stage ${stage.id}, partitions: ${partitionsToCompute}")
+      logDebug(s"Starting task creation for stage ${stage.id}, partitions: $partitionsToCompute")
       stage match {
         case stage: ShuffleMapStage =>
-          logInfo(s"[TASK CREATION] Processing ShuffleMapStage ${stage.id}")
+          logDebug(s"Processing ShuffleMapStage ${stage.id}")
           stage.pendingPartitions.clear()
           partitionsToCompute.flatMap { id =>
             val locs = taskIdToLocations(id)
             val part = partitions(id)
-            logInfo(s"[EXTRA LOG] prefered locations: ${locs}")
-            logInfo(s"[TASK CREATION] Creating 2 ShuffleMapTasks for partition ${id}")
+            logDebug(s"Partition $id preferred locations: $locs")
+            logDebug(s"Creating 2 replica ShuffleMapTasks for partition $id")
             stage.pendingPartitions += id
             // Create 2 tasks for the same partition (both work on same data)
             Seq[Task[_]](
@@ -1333,13 +1333,13 @@ private[spark] class DAGScheduler(
             )
           }
         case stage: ResultStage =>
-          logInfo(s"[TASK CREATION] Processing ResultStage ${stage.id}")
+          logDebug(s"Processing ResultStage ${stage.id}")
           partitionsToCompute.flatMap { id =>
             val p: Int = stage.partitions(id)
             val part = partitions(p)
             val locs = taskIdToLocations(id)
-            logInfo(s"[EXTRA LOG] prefered locations: ${locs}")
-            logInfo(s"[TASK CREATION] Creating 2 ResultTasks for partition ${id}")
+            logDebug(s"Partition $id preferred locations: $locs")
+            logDebug(s"Creating 2 replica ResultTasks for partition $id")
             // Create 2 tasks for the same partition (both work on same data)
             Seq[Task[_]](   
               new ResultTask(stage.id, stage.latestInfo.attemptNumber,
@@ -1364,7 +1364,7 @@ private[spark] class DAGScheduler(
     if (tasks.nonEmpty) {
       logInfo(s"Submitting ${tasks.size} missing tasks from $stage (${stage.rdd}) (first 15 " +
         s"tasks are for partitions ${tasks.take(15).map(_.partitionId)})")
-      logInfo(s"[TASK CREATION] ✅ TOTAL TASKS CREATED: ${tasks.size} for ${partitionsToCompute.size} partitions")
+      logInfo(s"[+] Created ${tasks.size} replica tasks for ${partitionsToCompute.size} partitions (2x replication)")
       
       taskScheduler.submitTasks(new TaskSet(
         tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties))
@@ -1557,7 +1557,7 @@ private[spark] class DAGScheduler(
             addPartitionPerResultStage(rt.partitionId)
             resultStage.activeJob match {
               case Some(job) =>
-                println(s"[EXTRA LOG][DAG] outputId = ${rt.outputId}")
+                logDebug(s"ResultTask outputId: ${rt.outputId}")
                 // Only update the accumulator once for each result task.
                 if (!job.finished(rt.outputId) && canEndPartitionForResultStage(rt.partitionId)) {
                   updateAccumulators(event)
@@ -1576,10 +1576,10 @@ private[spark] class DAGScheduler(
         // With different-index approach: replicas have indices 0,1 for partition 0; 2,3 for partition 1
         // So we use taskIndex/2 to map to partition ID for batching
         val partitionId = taskIndex / 2
-        println(s"[DAG BATCHING] Processing task completion: stageId=${stageId}, taskIndex=${taskIndex}, partitionId=${partitionId}")
+        logDebug(s"Processing task completion: stageId=$stageId, taskIndex=$taskIndex, partitionId=$partitionId")
         if (unpostedTaskEndEvent.contains(stageId)) {
           if (unpostedTaskEndEvent(stageId).contains(partitionId)) {
-            println(s"[DAG BATCHING] ✅ BOTH REPLICAS DONE: Processing both events for partition ${partitionId}")
+            logDebug(s"[+] Both replicas complete for partition $partitionId, processing both events")
             // Process both events through the normal completion flow
             val firstEvent = unpostedTaskEndEvent(stageId)(partitionId)
             
@@ -1601,42 +1601,41 @@ private[spark] class DAGScheduler(
             val eventToProcess = (firstSuccess, currentSuccess) match {
               case (true, true) =>
                 // IDEAL CASE: Both replicas succeeded!
-                println(s"[DAG BATCHING] ✅✅ BOTH replicas succeeded! Byzantine verification complete.")
-                println(s"[DAG BATCHING] Processing current event (taskId=${event.taskInfo.taskId})")
+                logInfo(s"[+] Both replicas succeeded for partition $partitionId, Byzantine verification complete")
                 event
               case (true, false) =>
                 // FALLBACK: First succeeded, current failed
-                println(s"[DAG BATCHING] ⚠️ Current event (taskId=${event.taskInfo.taskId}) failed: ${event.reason.getClass.getSimpleName}")
-                println(s"[DAG BATCHING] ✅ First event (taskId=${firstEvent.taskInfo.taskId}) succeeded - using it (Byzantine resilience)")
+                logWarning(s"[!] Replica task ${event.taskInfo.taskId} failed: ${event.reason.getClass.getSimpleName}")
+                logInfo(s"[+] Using successful replica task ${firstEvent.taskInfo.taskId} (Byzantine resilience)")
                 firstEvent
               case (false, true) =>
                 // FALLBACK: Current succeeded, first failed
-                println(s"[DAG BATCHING] ⚠️ First event (taskId=${firstEvent.taskInfo.taskId}) failed")
-                println(s"[DAG BATCHING] ✅ Current event (taskId=${event.taskInfo.taskId}) succeeded - using it (Byzantine resilience)")
+                logWarning(s"[!] Replica task ${firstEvent.taskInfo.taskId} failed")
+                logInfo(s"[+] Using successful replica task ${event.taskInfo.taskId} (Byzantine resilience)")
                 event
               case (false, false) =>
                 // ERROR: Both failed!
-                println(s"[DAG BATCHING] ❌❌ BOTH replicas failed! Cannot complete partition.")
+                logError(s"[X] Both replicas failed for partition $partitionId, cannot complete partition")
                 return  // Both failed, return early
             }
             
             // Continue processing with the successful event
             if (eventToProcess != event) {
               // Need to reprocess with the first event instead
-              println(s"[DAG BATCHING] 🔄 Switching to process first event for job completion")
+              logDebug(s"Switching to process first event for job completion")
               handleTaskCompletion(firstEvent, bypassBatching = true)
               return
             }
             // else: current event is Success, continue normal flow below
           }
           else {
-            println(s"[DAG BATCHING] ⏳ FIRST REPLICA: Storing event for partition ${partitionId}, waiting for partner")
+            logDebug(s"[*] First replica complete for partition $partitionId, waiting for partner")
             unpostedTaskEndEvent(stageId)(partitionId) = event
             return  // Return early, wait for second replica
           }
         }
         else {
-          println(s"[DAG BATCHING] ⏳ FIRST STAGE COMPLETION: Creating storage for stage ${stageId}, partition ${partitionId}")
+          logDebug(s"[*] First task completion for stage $stageId, partition $partitionId, waiting for partner")
           unpostedTaskEndEvent(stageId) = HashMap(partitionId -> event)
           return  // Return early, wait for second replica
         }
@@ -1644,12 +1643,12 @@ private[spark] class DAGScheduler(
     }
 
 
-    println(s"[DEBUG] About to process event.reason for taskId=${event.taskInfo.taskId}, taskIndex=${taskIndex}")
-    println(s"[DEBUG] event.reason = ${event.reason}, event.reason.getClass = ${event.reason.getClass}")
+    logDebug(s"Processing event reason for taskId=${event.taskInfo.taskId}, taskIndex=$taskIndex")
+    logDebug(s"Event reason: ${event.reason.getClass.getSimpleName}")
     
     event.reason match {
       case Success =>
-        println(s"[DEBUG] ✅ Event reason is Success for taskId=${event.taskInfo.taskId}")
+        logDebug(s"Task ${event.taskInfo.taskId} completed successfully")
         // An earlier attempt of a stage (which is zombie) may still have running tasks. If these
         // tasks complete, they still count and we can mark the corresponding partitions as
         // finished. Here we notify the task scheduler to skip running tasks for the same partition,
@@ -1661,27 +1660,26 @@ private[spark] class DAGScheduler(
 
         task match {
           case rt: ResultTask[_, _] =>
-            println(s"[DEBUG] Processing ResultTask for taskId=${event.taskInfo.taskId}, outputId=${rt.outputId}, partitionId=${rt.partitionId}")
+            logDebug(s"Processing ResultTask: taskId=${event.taskInfo.taskId}, outputId=${rt.outputId}, partitionId=${rt.partitionId}")
             // Cast to ResultStage here because it's part of the ResultTask
             // TODO Refactor this out to a function that accepts a ResultStage
             val resultStage = stage.asInstanceOf[ResultStage]
             resultStage.activeJob match {
               case Some(job) =>
-                println(s"[DEBUG] ActiveJob found. job.finished(${rt.outputId})=${job.finished(rt.outputId)}")
+                logDebug(s"ActiveJob found, job.finished(${rt.outputId})=${job.finished(rt.outputId)}")
                 val canEnd = canEndPartitionForResultStage(rt.partitionId)
-                println(s"[DEBUG] canEndPartitionForResultStage(${rt.partitionId})=${canEnd}")
+                logDebug(s"canEndPartitionForResultStage(${rt.partitionId})=$canEnd")
                 if (!job.finished(rt.outputId) && canEnd) {
-                  println(s"[DEBUG] ✅ Marking partition complete: outputId=${rt.outputId}")
+                  logDebug(s"Marking partition complete: outputId=${rt.outputId}")
                   job.finished(rt.outputId) = true
                   job.numFinished += 1
                   // If the whole job has finished, remove it
-                  logInfo(s"[EXTRA LOG][DAG SCHEDULER] NUM FINISHED = ${job.numFinished}")
-                  logInfo(s"[EXTRA LOG][DAG SCHEDULER] NUM PARTITIONS = ${job.numPartitions}")
+                  logDebug(s"Job progress: ${job.numFinished}/${job.numPartitions} partitions finished")
                   val canFinish = canMarkStageAsFinished(stageId)
-                  println(s"[DEBUG] canMarkStageAsFinished(${stageId})=${canFinish}")
+                  logDebug(s"canMarkStageAsFinished($stageId)=$canFinish")
 //                  if (job.numFinished == job.numPartitions) {
                   if(canFinish){
-                    println(s"[DEBUG] 🎉 JOB FINISHING: Starting job completion for job ${job.jobId}")
+                    logInfo(s"[+] Job ${job.jobId} finishing, all tasks complete")
                     markStageAsFinished(resultStage)
                     cancelRunningIndependentStages(job, s"Job ${job.jobId} is finished.")
                     cleanupStateForJobAndIndependentStages(job)
@@ -1700,7 +1698,7 @@ private[spark] class DAGScheduler(
                       case e: UnsupportedOperationException =>
                         logWarning(s"Could not cancel tasks for stage $stageId", e)
                     }
-                    println(s"[EXTRA LOG][DAG] calling JobEnd()")
+                    logDebug(s"Calling job completion listener for job ${job.jobId}")
                     listenerBus.post(
                       SparkListenerJobEnd(job.jobId, clock.getTimeMillis(), JobSucceeded))
                   }
@@ -1709,11 +1707,11 @@ private[spark] class DAGScheduler(
                   // we are resilient against that.
                   // TODO: Next point to search into [john]
                   try {
-                    println(s"[EXTRA LOG][DAG] job.listener.taskSucceeded()")
+                    logDebug(s"Calling job.listener.taskSucceeded for outputId=${rt.outputId}")
                     job.listener.taskSucceeded(rt.outputId, event.result)
                   } catch {
                     case e: Throwable if !Utils.isFatalError(e) =>
-                      println(s"[EXTRA LOG][DAG] ANY EXEPTIONS ?????? ")
+                      logError(s"[X] Exception in job.listener.taskSucceeded: ${e.getMessage}")
                       job.listener.jobFailed(new SparkDriverExecutionException(e))
                   }
                 }

@@ -544,7 +544,7 @@ private[spark] class MapOutputTrackerMaster(
    * if the MapOutputTrackerMaster doesn't know about this shuffle.
    */
   def findMissingPartitions(shuffleId: Int): Option[Seq[Int]] = {
-    println("[EXTRA LOG] FIND MISSING PARTITIONS")
+    logDebug(s"Finding missing partitions for shuffle $shuffleId")
     shuffleStatuses.get(shuffleId).map(_.findMissingPartitions())
   }
 

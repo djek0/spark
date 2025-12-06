@@ -538,17 +538,51 @@ private[spark] class Executor(
         var valueBytes = resultSer.serialize(value)
 
         if(honestFlag == "False" && (taskId.toInt == 2 || taskId.toInt == 7)) {
-          logInfo(s"[EXTRA LOG] TRYING TO CHEAT")
+          logInfo(s"[EXTRA LOG] TRYING TO CHEAT - injecting different hash but keeping same result type")
          /**
-          * Driver allocates: results = new Array[Array[Int]](numPartitions)
-          * and then it ll try to deserialize it
-          * but if it isnt  the same type it expects
-          * it will crash
-          * so needs to serialize a value of the same type as the original result
+          * BYZANTINE FAULT INJECTION FOR TESTING
+          * =====================================
+          * 
+          * We want to inject a DIFFERENT result to trigger Byzantine fault detection,
+          * but we MUST preserve the same TYPE as the original result.
+          * 
+          *
+          * Driver expects a curtain type in order to diserialize the result correctly,
+          * more specifically JobWaiter.taskSucceeded() casts the result: result.asInstanceOf[T]
+          * If we send wrong type we get ClassCastException at runtime
+          * So we modify the BYTES (changing the hash) but keep the TYPE structure intact
           */
-          val fakeDishonestResult = Array(0,0,0,0,1,3,1,2,0,0,0)  // has to be an Array[Int] because actions return Array[Int]
-          valueBytes = resultSer.serialize(fakeDishonestResult)
+          val modifiedBytes = valueBytes.array().clone()
+          logInfo(s"[BYZANTINE TEST] Result bytes length: ${modifiedBytes.length}")
+          // CONSERVATIVE STRATEGY: Flip only last 10% to stay far from type descriptors (headers, etc)
+
+          if (modifiedBytes.length >= 20) {
+            // CASE 1: Normal results (≥20 bytes)
+            // Flip last 10% of bytes (guaranteed to be data/padding, not type headers)
+            val bytesToFlip = (modifiedBytes.length * 0.1).toInt
+            val startIdx = modifiedBytes.length - bytesToFlip
+            for (i <- startIdx until modifiedBytes.length) {
+              modifiedBytes(i) = (modifiedBytes(i) ^ 0xFF).toByte
+            }
+          } else if (modifiedBytes.length >= 2) {
+            // CASE 2: Very small results (2-19 bytes)
+            // Flip only the LAST BYTE (guaranteed to be data/padding)
+            val lastIdx = modifiedBytes.length - 1
+            modifiedBytes(lastIdx) = (modifiedBytes(lastIdx) ^ 0xFF).toByte
+          } else {
+            // CASE 3: Too small or empty (<2 bytes)
+            // Cannot safely inject fault
+            logWarning(s"[BYZANTINE TEST] Result too small (${modifiedBytes.length} bytes), cannot inject fault safely")
+          }
+          logInfo(s"[BYZANTINE TEST]  Result bytes length: ${modifiedBytes.length}")
+          valueBytes = java.nio.ByteBuffer.wrap(modifiedBytes)
         }
+        logInfo(s"[BYZANTINE TEST] valueBytes: ${valueBytes.array()}" +
+          s" length: ${valueBytes.array().length}" +
+          s" as array: ${valueBytes.array()}" +
+          s" as array: ${valueBytes.array().mkString(", ")}"
+        )
+
 
         val afterSerializationNs = System.nanoTime()
 
@@ -611,10 +645,10 @@ private[spark] class Executor(
         // Note: accumulator updates must be collected after TaskMetrics is updated
         val accumUpdates = task.collectAccumulatorUpdates()
         var metricPeaks = metricsPoller.getTaskMetricPeaks(taskId)  //array[Long]
-        val hashSize : Int = envOrElse("HASH_SIZE", "250").toInt
-
-        val resultBufferAsArray =  Arrays.toString(valueBytes.array())
-        val hashValueCandidate = resultBufferAsArray.slice(0, hashSize).hashCode().toLong
+        
+        // Hash the ENTIRE byte array to detect any modifications
+        // prevent converting to string to avoid overhead
+        val hashValueCandidate = java.util.Arrays.hashCode(valueBytes.array()).toLong
         metricPeaks = metricPeaks :+ hashValueCandidate
         // TODO: do not serialize value twice
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)
