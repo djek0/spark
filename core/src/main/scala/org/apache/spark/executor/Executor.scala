@@ -68,7 +68,7 @@ private[spark] class Executor(
     uncaughtExceptionHandler: UncaughtExceptionHandler = new SparkUncaughtExceptionHandler,
     resources: immutable.Map[String, ResourceInformation])
   extends Logging {
-  logInfo(s"[EXTRA_lOG] Starting executor ID $executorId on host $executorHostname")
+  logDebug(s"Starting executor ID $executorId on host $executorHostname")
 
   private val executorShutdown = new AtomicBoolean(false)
   val stopHookReference = ShutdownHookManager.addShutdownHook(
@@ -133,7 +133,6 @@ private[spark] class Executor(
     }
 
   if (!isLocal) {
-    conf.get("spark.app.name")
     env.blockManager.initialize(conf.getAppId)
     env.metricsSystem.registerSource(executorSource)
     env.metricsSystem.registerSource(new JVMCPUSource())
@@ -431,9 +430,6 @@ private[spark] class Executor(
     }
 
     override def run(): Unit = {
-      // Simple log to verify executor is running
-      logInfo(s"[EXTRA_lOG] HELLO FROM EXECUTOR! Executor ID: $executorId, Task ID: $taskId")
-      
       setMDCForTask(taskName, mdcProperties)
       threadId = Thread.currentThread.getId
       Thread.currentThread.setName(threadName)
@@ -505,14 +501,10 @@ private[spark] class Executor(
             plugins = plugins)
           threwException = false
 
-          logInfo(s"[EXTRA_lOG] ==========================================")
-          logInfo(s"[EXTRA_lOG] The result for task $taskName is res: $res")
-          logInfo(s"[EXTRA_lOG] The result for task $taskName is res: ${res match {
+          logDebug(s"Task $taskName result: ${res match {
             case a: Array[_] => a.mkString("Array(", ", ", ")")
             case x => x.toString
           }}")
-          logInfo(s"[EXTRA_lOG] ==========================================")
-
 
           res
         } {
@@ -559,16 +551,6 @@ private[spark] class Executor(
         val beforeSerializationNs = System.nanoTime()
         val valueBytes = resultSer.serialize(value)
         val afterSerializationNs = System.nanoTime()
-
-        logInfo(s"[EXTRA_lOG] ==========================================")
-        logInfo(s"[EXTRA_lOG] The value for task $taskName is: $value.")
-        logInfo(s"[EXTRA_lOG] The value for task $taskName is val: ${value match {
-          case a: Array[_] => a.mkString("Array(", ", ", ")")
-          case x => x.toString
-        }}")
-        logInfo(s"[EXTRA_lOG] ==========================================")
-
-
 
         // Deserialization happens in two parts: first, we deserialize a Task object, which
         // includes the Partition. Second, Task.run() deserializes the RDD and function to be run.
@@ -633,12 +615,7 @@ private[spark] class Executor(
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)
         val serializedDirectResult = ser.serialize(directResult)
         val resultSize = serializedDirectResult.limit()
-        logInfo("[EXTRA_lOG] #########################")
-        logInfo(s"[EXTRA_lOG]CHECK check CHECK directResult: $directResult + " +
-          s" serializedDirectResult: $serializedDirectResult +" +
-          s" resultSize: $resultSize")
-        logInfo("[EXTRA_lOG] #########################")
-
+        logDebug(s"Task $taskName: directResult size=$resultSize bytes")
 
         // directSend = sending directly back to the driver
         val serializedResult: ByteBuffer = {
@@ -659,22 +636,6 @@ private[spark] class Executor(
             logInfo(s"Finished $taskName. $resultSize bytes result sent to driver")
             serializedDirectResult
           }
-        }
-
-
-        try {
-          logInfo(s"[EXTRA_lOG] <3<3<3")
-          logInfo(s"[EXTRA_lOG] The value for task $taskName is: $value.")
-          logInfo(s"[EXTRA_lOG] The value for task $taskName is val: ${
-            value match {
-              case a: Array[_] => a.mkString("Array(", ", ", ")")
-              case x => x.toString
-            }
-          }")
-          logInfo(s"[EXTRA_lOG] <3<3<3")
-        } catch {
-          case e: Exception =>
-            logError(s"Unexpected error in value printing process for task $taskId", e)
         }
 
 
