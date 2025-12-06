@@ -58,7 +58,6 @@ import org.apache.spark.launcher.SparkLauncher
 import org.apache.spark.util._
 
 
-import scala.io.Source
 /**
  * Whether to submit, kill, or request the status of an application.
  * The latter two operations are currently supported only for standalone and Mesos cluster modes.

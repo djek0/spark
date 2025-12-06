@@ -23,7 +23,6 @@ import java.util.{Date, Locale, UUID}
 import java.util.concurrent._
 import java.util.concurrent.{Future => JFuture, ScheduledFuture => JScheduledFuture}
 import java.util.function.Supplier
-import scala.io.Source
 import scala.collection.mutable.{HashMap, HashSet, LinkedHashMap}
 import scala.concurrent.ExecutionContext
 import scala.util.{Failure, Random, Success}

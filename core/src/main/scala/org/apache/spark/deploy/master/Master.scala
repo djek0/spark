@@ -20,7 +20,6 @@ package org.apache.spark.deploy.master
 import java.text.SimpleDateFormat
 import java.util.{Date, Locale}
 import java.util.concurrent.{ScheduledFuture, TimeUnit}
-import scala.io.Source
 import scala.collection.mutable.{ArrayBuffer, HashMap, HashSet}
 import scala.util.Random
 
