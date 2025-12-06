@@ -184,13 +184,6 @@ private[spark] class ContextCleaner(
     referenceBuffer.add(new CleanupTaskWeakReference(task, objectForCleanup, referenceQueue))
   }
 
-  /** Register a SparkListener to be cleaned up when its owner is garbage collected. */
-  def registerSparkListenerForCleanup(
-      listenerOwner: AnyRef,
-      listener: SparkListener): Unit = {
-    registerForCleanup(listenerOwner, CleanSparkListener(listener))
-  }
-
   /** Keep cleaning RDD, shuffle, and broadcast state. */
   private def keepCleaning(): Unit = Utils.tryOrStopSparkContext(sc) {
     while (!stopped) {
