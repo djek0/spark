@@ -44,7 +44,6 @@ import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.rpc._
 import org.apache.spark.util.{SignalUtils, SparkUncaughtExceptionHandler, ThreadUtils, Utils}
-//import contract.localGanaceDeploy
 
 private[deploy] class Worker(
     override val rpcEnv: RpcEnv,

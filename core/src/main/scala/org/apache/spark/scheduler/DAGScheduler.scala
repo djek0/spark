@@ -48,7 +48,6 @@ import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.storage._
 import org.apache.spark.storage.BlockManagerMessages.BlockManagerHeartbeat
 import org.apache.spark.util._
-import org.apache.spark.scheduler.TaskResultVerificationManager
 
 //import org.apache.spark.deploy.master.localGanaceDeploy
 

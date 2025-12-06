@@ -57,7 +57,6 @@ import org.apache.spark.internal.config.UI._
 import org.apache.spark.launcher.SparkLauncher
 import org.apache.spark.util._
 
-//import contract.localGanaceDeploy
 
 import scala.io.Source
 /**

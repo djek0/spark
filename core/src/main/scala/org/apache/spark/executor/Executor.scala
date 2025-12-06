@@ -55,9 +55,7 @@ import org.apache.spark.shuffle.{FetchFailedException, ShuffleBlockPusher}
 import org.apache.spark.storage.{StorageLevel, TaskResultBlockId}
 import org.apache.spark.util._
 import org.apache.spark.util.io.ChunkedByteBuffer
-//import org.apache.spark.deploy.worker.localContractWorker
 
-import scala.io.Source
 /**
  * Spark executor, backed by a threadpool to run tasks.
  *
