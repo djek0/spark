@@ -795,11 +795,6 @@ private[spark] class ApplicationMaster(
         SparkHadoopUtil.get.addDelegationTokens(tokens, sparkConf)
     }
 
-    override def receive: PartialFunction[Any, Unit] = {
-      case UpdateDelegationTokens(tokens) =>
-        SparkHadoopUtil.get.addDelegationTokens(tokens, sparkConf)
-    }
-
     override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
       case r: RequestExecutors =>
         Option(allocator) match {

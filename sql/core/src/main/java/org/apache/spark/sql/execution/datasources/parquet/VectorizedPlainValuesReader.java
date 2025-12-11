@@ -92,38 +92,6 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
     }
   }
 
-  // A fork of `readIntegers` to rebase the date values. For performance reasons, this method
-  // iterates the values twice: check if we need to rebase first, then go to the optimized branch
-  // if rebase is not needed.
-  @Override
-  public final void readIntegersWithRebase(
-      int total, WritableColumnVector c, int rowId, boolean failIfRebase) {
-    int requiredBytes = total * 4;
-    ByteBuffer buffer = getBuffer(requiredBytes);
-    boolean rebase = false;
-    for (int i = 0; i < total; i += 1) {
-      rebase |= buffer.getInt(buffer.position() + i * 4) < RebaseDateTime.lastSwitchJulianDay();
-    }
-    if (rebase) {
-      if (failIfRebase) {
-        throw DataSourceUtils.newRebaseExceptionInRead("Parquet");
-      } else {
-        for (int i = 0; i < total; i += 1) {
-          c.putInt(rowId + i, RebaseDateTime.rebaseJulianToGregorianDays(buffer.getInt()));
-        }
-      }
-    } else {
-      if (buffer.hasArray()) {
-        int offset = buffer.arrayOffset() + buffer.position();
-        c.putIntsLittleEndian(rowId, total, buffer.array(), offset);
-      } else {
-        for (int i = 0; i < total; i += 1) {
-          c.putInt(rowId + i, buffer.getInt());
-        }
-      }
-    }
-  }
-
   @Override
   public void skipIntegers(int total) {
     in.skip(total * 4L);
@@ -181,38 +149,6 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
     } else {
       for (int i = 0; i < total; i += 1) {
         c.putLong(rowId + i, buffer.getLong());
-      }
-    }
-  }
-
-  // A fork of `readLongs` to rebase the timestamp values. For performance reasons, this method
-  // iterates the values twice: check if we need to rebase first, then go to the optimized branch
-  // if rebase is not needed.
-  @Override
-  public final void readLongsWithRebase(
-      int total, WritableColumnVector c, int rowId, boolean failIfRebase) {
-    int requiredBytes = total * 8;
-    ByteBuffer buffer = getBuffer(requiredBytes);
-    boolean rebase = false;
-    for (int i = 0; i < total; i += 1) {
-      rebase |= buffer.getLong(buffer.position() + i * 8) < RebaseDateTime.lastSwitchJulianTs();
-    }
-    if (rebase) {
-      if (failIfRebase) {
-        throw DataSourceUtils.newRebaseExceptionInRead("Parquet");
-      } else {
-        for (int i = 0; i < total; i += 1) {
-          c.putLong(rowId + i, RebaseDateTime.rebaseJulianToGregorianMicros(buffer.getLong()));
-        }
-      }
-    } else {
-      if (buffer.hasArray()) {
-        int offset = buffer.arrayOffset() + buffer.position();
-        c.putLongsLittleEndian(rowId, total, buffer.array(), offset);
-      } else {
-        for (int i = 0; i < total; i += 1) {
-          c.putLong(rowId + i, buffer.getLong());
-        }
       }
     }
   }

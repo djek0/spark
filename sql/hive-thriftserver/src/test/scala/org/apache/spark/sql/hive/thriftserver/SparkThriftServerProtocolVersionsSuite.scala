@@ -244,11 +244,6 @@ class SparkThriftServerProtocolVersionsSuite extends HiveThriftServer2TestBase {
         assert(rs.next())
         assert(rs.getBigDecimal(1) === null)
       }
-      testExecuteStatementWithProtocolVersion(version,
-        "SELECT cast(null as decimal) ") { rs =>
-        assert(rs.next())
-        assert(rs.getBigDecimal(1) === null)
-      }
     }
 
     test(s"$version get string type") {

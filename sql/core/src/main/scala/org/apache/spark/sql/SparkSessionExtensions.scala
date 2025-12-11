@@ -129,13 +129,6 @@ class SparkSessionExtensions {
   }
 
   /**
-   * Build the override rules for the query stage preparation phase of adaptive query execution.
-   */
-  private[sql] def buildQueryStagePrepRules(session: SparkSession): Seq[Rule[SparkPlan]] = {
-    queryStagePrepRuleBuilders.map(_.apply(session)).toSeq
-  }
-
-  /**
    * Inject a rule that can override the columnar execution of an executor.
    */
   def injectColumnar(builder: ColumnarRuleBuilder): Unit = {

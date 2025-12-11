@@ -571,12 +571,8 @@ private class LiveStageMetrics(
           case o => throw QueryExecutionErrors.unexpectedAccumulableUpdateValueError(o)
         }
 
-        try {
-          val metricValues = taskMetrics.computeIfAbsent(acc.id, _ => new Array(numTasks))
-          metricValues(taskIdx) = value
-        } catch {
-          case e: java.lang.ArrayIndexOutOfBoundsException => {}
-        }
+        val metricValues = taskMetrics.computeIfAbsent(acc.id, _ => new Array(numTasks))
+        metricValues(taskIdx) = value
 
         if (SQLMetrics.metricNeedsMax(accumIdsToMetricType(acc.id))) {
           val maxMetricsTaskId = metricsIdToMaxTaskValue.computeIfAbsent(acc.id, _ => Array(value,

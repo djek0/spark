@@ -120,14 +120,6 @@ class MapInPandasTests(ReusedSQLTestCase):
         expected = df1.join(df1).collect()
         self.assertEqual(sorted(actual), sorted(expected))
 
-    def test_self_join(self):
-        # SPARK-34319: self-join with MapInPandas
-        df1 = self.spark.range(10)
-        df2 = df1.mapInPandas(lambda iter: iter, 'id long')
-        actual = df2.join(df2).collect()
-        expected = df1.join(df1).collect()
-        self.assertEqual(sorted(actual), sorted(expected))
-
 
 if __name__ == "__main__":
     from pyspark.sql.tests.test_pandas_map import *  # noqa: F401

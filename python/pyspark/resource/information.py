@@ -24,12 +24,6 @@ class ResourceInformation(object):
 
     One example is GPUs, where the addresses would be the indices of the GPUs
 
-<<<<<<<< HEAD:python/pyspark/resource.py
-    :param name: the name of the resource
-    :param addresses: an array of strings describing the addresses of the resource
-
-    .. versionadded:: 3.0.0
-========
     .. versionadded:: 3.0.0
 
     Parameters
@@ -42,7 +36,6 @@ class ResourceInformation(object):
     Notes
     -----
     This API is evolving.
->>>>>>>> my-new-branch:python/pyspark/resource/information.py
     """
 
     def __init__(self, name, addresses):

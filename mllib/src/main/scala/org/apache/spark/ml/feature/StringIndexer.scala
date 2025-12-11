@@ -85,9 +85,6 @@ private[feature] trait StringIndexerBase extends Params with HasHandleInvalid wi
   @Since("2.3.0")
   def getStringOrderType: String = $(stringOrderType)
 
-  setDefault(handleInvalid -> StringIndexer.ERROR_INVALID,
-    stringOrderType -> StringIndexer.frequencyDesc)
-
   /** Returns the input and output column names corresponding in pair. */
   private[feature] def getInOutCols(): (Array[String], Array[String]) = {
     ParamValidators.checkSingleVsMultiColumnParams(this, Seq(outputCol), Seq(outputCols))

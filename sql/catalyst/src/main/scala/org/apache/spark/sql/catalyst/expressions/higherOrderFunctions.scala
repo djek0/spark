@@ -672,12 +672,6 @@ object ArrayExists {
   }
 }
 
-object ArrayExists {
-  def apply(argument: Expression, function: Expression): ArrayExists = {
-    new ArrayExists(argument, function)
-  }
-}
-
 /**
  * Tests whether a predicate holds for all elements in the array.
  */
