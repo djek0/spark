@@ -346,6 +346,7 @@ abstract class RDD[T: ClassTag](
         val outWriter = Trace.createOutputWriter(
           stageId = context.stageId,
           partitionId = split.index,
+          taskIndex = context.taskIndex(),
           attempt = context.attemptNumber,
           taskId = context.taskAttemptId(),
           appName = appName
@@ -421,6 +422,7 @@ abstract class RDD[T: ClassTag](
         val inputWriter = Trace.createInputWriter(
           stageId = context.stageId,
           partitionId = split.index,
+          taskIndex = context.taskIndex(),
           attempt = context.attemptNumber,
           taskId = context.taskAttemptId(),
           appName = appName

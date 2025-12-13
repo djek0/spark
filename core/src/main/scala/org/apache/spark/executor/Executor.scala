@@ -512,6 +512,7 @@ private[spark] class Executor(
           val res = task.run(
             taskAttemptId = taskId,
             attemptNumber = taskDescription.attemptNumber,
+            taskIndex = taskDescription.index,
             metricsSystem = env.metricsSystem,
             resources = taskDescription.resources,
             plugins = plugins)

@@ -6,7 +6,9 @@ import org.apache.spark.internal.Logging
 
 object TaskResultVerificationManager extends Logging {
 
+  // Maps taskId -> (stageId, taskIndex) where taskIndex is the array index (not taskId!)
   var tidToStageIndexInfo = new HashMap[Long, (Int, Int)]
+  // Maps (stageId, taskIndex) -> resultHash
   var stageIndexToResultHash = new HashMap[(Int, Int), String]
 
   def addNewRunningTask(tid: Int, indexStage: (Int, Int)): Unit = {
@@ -34,8 +36,9 @@ object TaskResultVerificationManager extends Logging {
       val stageIndex = tidToStageIndexInfo(tid)
       if(stageIndexToResultHash.contains(stageIndex)){
         val stageId = stageIndex._1
-        val index = stageIndex._2
+        val index = stageIndex._2  // This is the real array index (0,1,2,3...) not taskId
         logDebug(s"Verifying task $tid (stage $stageId, index $index)")
+        // Replica pairing: even index (0,2,4...) pairs with odd index (1,3,5...)
         if(index%2 == 0){
           val partnerIndex = index + 1
           if(stageIndexToResultHash.contains((stageId, partnerIndex))){

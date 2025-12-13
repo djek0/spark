@@ -217,6 +217,8 @@ class BarrierTaskContext private[spark] (
 
   override def attemptNumber(): Int = taskContext.attemptNumber()
 
+  override def taskIndex(): Int = taskContext.taskIndex()
+
   override def taskAttemptId(): Long = taskContext.taskAttemptId()
 
   override def getLocalProperty(key: String): String = taskContext.getLocalProperty(key)

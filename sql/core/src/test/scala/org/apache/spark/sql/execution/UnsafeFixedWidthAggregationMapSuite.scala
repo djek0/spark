@@ -80,6 +80,7 @@ class UnsafeFixedWidthAggregationMapSuite
         partitionId = 0,
         taskAttemptId = Random.nextInt(10000),
         attemptNumber = 0,
+        taskIndex = 0,
         taskMemoryManager = taskMemoryManager,
         localProperties = new Properties,
         metricsSystem = null))

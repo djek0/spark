@@ -91,11 +91,11 @@ private[spark] object Trace extends Logging {
    * Create a new writer for input logging.
    * The writer must be explicitly closed when done.
    */
-  def createInputWriter(stageId: Int, partitionId: Int, attempt: Int, taskId: Long, appName: String): SafeWriter = {
+  def createInputWriter(stageId: Int, partitionId: Int, taskIndex: Int, attempt: Int, taskId: Long, appName: String): SafeWriter = {
     val userHome = System.getProperty("user.home")
     val dir = new File(s"$userHome/spark/spark-trace/$appName")
     dir.mkdirs()  // Ensure directory exists
-    val file = new File(dir, s"spark_inputs_stage${stageId}_p${partitionId}_att${attempt}_taskId${taskId}.tmp")
+    val file = new File(dir, s"spark_inputs_stage${stageId}_taskIndex${taskIndex}_p${partitionId}_att${attempt}_taskId${taskId}.tmp")
     val writer = new SafeWriter(file)
     activeWriters.put(Thread.currentThread().getName, writer)
     writer
@@ -105,11 +105,11 @@ private[spark] object Trace extends Logging {
    * Create a new writer for output logging.
    * The writer must be explicitly closed when done.
    */
-  def createOutputWriter(stageId: Int, partitionId: Int, attempt: Int, taskId: Long, appName: String): SafeWriter = {
+  def createOutputWriter(stageId: Int, partitionId: Int, taskIndex: Int, attempt: Int, taskId: Long, appName: String): SafeWriter = {
     val userHome = System.getProperty("user.home")
     val dir = new File(s"$userHome/spark/spark-trace/$appName")
     dir.mkdirs()  // Ensure directory exists
-    val file = new File(dir, s"spark_finals_stage${stageId}_p${partitionId}_att${attempt}_taskId${taskId}.tmp")
+    val file = new File(dir, s"spark_finals_stage${stageId}_taskIndex${taskIndex}_p${partitionId}_att${attempt}_taskId${taskId}.tmp")
     val writer = new SafeWriter(file)
     activeWriters.put(Thread.currentThread().getName, writer)
     writer

@@ -76,12 +76,14 @@ private[spark] abstract class Task[T](
    *
    * @param taskAttemptId an identifier for this task attempt that is unique within a SparkContext.
    * @param attemptNumber how many times this task has been attempted (0 for the first attempt)
+   * @param taskIndex the index of this task within its TaskSet (for replica pairing)
    * @param resources other host resources (like gpus) that this task attempt can access
    * @return the result of the task along with updates of Accumulators.
    */
   final def run(
       taskAttemptId: Long,
       attemptNumber: Int,
+      taskIndex: Int,
       metricsSystem: MetricsSystem,
       resources: Map[String, ResourceInformation],
       plugins: Option[PluginContainer]): T = {
@@ -94,6 +96,7 @@ private[spark] abstract class Task[T](
       partitionId,
       taskAttemptId,
       attemptNumber,
+      taskIndex,
       taskMemoryManager,
       localProperties,
       metricsSystem,

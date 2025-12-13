@@ -571,8 +571,8 @@ private[spark] class TaskSetManager(
     }
     
     // Task replication: Register with verification manager for consensus checking
-    val verificationIndex = taskId.toInt
-    val stageIndex = (taskSet.stageId, verificationIndex)
+    // Use real array index (not taskId) for replica pairing
+    val stageIndex = (taskSet.stageId, index)
     logInfo(s"[VERIFICATION REGISTER] Registering taskId=${taskId} with stageIndex=${stageIndex} (array index=${index})")
     TaskResultVerificationManager.addNewRunningTask(taskId.toInt, stageIndex)
     

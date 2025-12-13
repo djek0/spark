@@ -67,7 +67,7 @@ object TaskContext {
    * An empty task context that does not represent an actual task.  This is only used in tests.
    */
   private[spark] def empty(): TaskContextImpl = {
-    new TaskContextImpl(0, 0, 0, 0, 0, null, new Properties, null)
+    new TaskContextImpl(0, 0, 0, 0, 0, 0, null, new Properties, null)
   }
 }
 
@@ -164,6 +164,15 @@ abstract class TaskContext extends Serializable {
    * attemptNumber = 0, and subsequent attempts will have increasing attempt numbers.
    */
   def attemptNumber(): Int
+
+  /**
+   * The index of this task within its TaskSet. This is the array position in the TaskSet's
+   * task array and is used for replica pairing in task replication (even/odd index pairs).
+   * For example, in a TaskSet with 4 tasks for 2 partitions with 2x replication:
+   * - Index 0 and 1 are replicas of partition 0
+   * - Index 2 and 3 are replicas of partition 1
+   */
+  def taskIndex(): Int
 
   /**
    * An ID that is unique to this task attempt (within the same SparkContext, no two task attempts
