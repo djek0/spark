@@ -88,15 +88,6 @@ private[spark] class Executor(
   private val conf = env.conf
   val honestFlag = envOrElse("HONEST", "True");
   logInfo(s"[EXTRA LOG] HONEST FLAG: ${honestFlag} for executor-${executorId}")
-//  try{
-//    localContractWorker.instance().loadDeployedContract();
-//    logInfo("[WORKER] Successfully loaded deployed contract")
-//  } catch {
-//    case e: Throwable => {
-//      logError(e.toString)
-//      logError("[WORKER] filaed to launch contract")
-//    }
-//  }
 
   // No ip or host:port - just hostname
   Utils.checkHost(executorHostname)
@@ -568,23 +559,24 @@ private[spark] class Executor(
         val beforeSerializationNs = System.nanoTime()
         var valueBytes = resultSer.serialize(value)
 
+        /**
+         * BYZANTINE FAULT INJECTION FOR TESTING
+         * =====================================
+         *
+         * We want to inject a DIFFERENT result to trigger Byzantine fault detection,
+         * but we MUST preserve the same TYPE as the original result.
+         *
+         *
+         * Driver expects a curtain type in order to diserialize the result correctly,
+         * more specifically JobWaiter.taskSucceeded() casts the result: result.asInstanceOf[T]
+         * If we send wrong type we get ClassCastException at runtime
+         * So we modify the BYTES (changing the hash) but keep the TYPE structure intact
+         */
         if(honestFlag == "False" && (taskId.toInt == 2 || taskId.toInt == 7)) {
-          logInfo(s"[EXTRA LOG] TRYING TO CHEAT - injecting different hash but keeping same result type")
-         /**
-          * BYZANTINE FAULT INJECTION FOR TESTING
-          * =====================================
-          * 
-          * We want to inject a DIFFERENT result to trigger Byzantine fault detection,
-          * but we MUST preserve the same TYPE as the original result.
-          * 
-          *
-          * Driver expects a curtain type in order to diserialize the result correctly,
-          * more specifically JobWaiter.taskSucceeded() casts the result: result.asInstanceOf[T]
-          * If we send wrong type we get ClassCastException at runtime
-          * So we modify the BYTES (changing the hash) but keep the TYPE structure intact
-          */
+          logInfo(s"[BYZANTINE TEST] TRYING TO CHEAT- EXECUTOR: $taskId - injecting different hash but keeping same result type")
+
           val modifiedBytes = valueBytes.array().clone()
-          logInfo(s"[BYZANTINE TEST] Result bytes length: ${modifiedBytes.length}")
+          logInfo(s"[BYZANTINE TEST] EXECUTOR: $taskId - Result bytes length: ${modifiedBytes.length}")
           // CONSERVATIVE STRATEGY: Flip only last 10% to stay far from type descriptors (headers, etc)
 
           if (modifiedBytes.length >= 20) {
@@ -603,12 +595,12 @@ private[spark] class Executor(
           } else {
             // CASE 3: Too small or empty (<2 bytes)
             // Cannot safely inject fault
-            logWarning(s"[BYZANTINE TEST] Result too small (${modifiedBytes.length} bytes), cannot inject fault safely")
+            logWarning(s"[BYZANTINE TEST] EXECUTOR: $taskId - Result too small (${modifiedBytes.length} bytes), cannot inject fault safely")
           }
-          logInfo(s"[BYZANTINE TEST]  Result bytes length: ${modifiedBytes.length}")
+          logInfo(s"[BYZANTINE TEST]  EXECUTOR: $taskId - Result bytes length: ${modifiedBytes.length}")
           valueBytes = java.nio.ByteBuffer.wrap(modifiedBytes)
         }
-        logInfo(s"[BYZANTINE TEST] valueBytes: ${valueBytes.array()}" +
+        logDebug(s"[BYZANTINE TEST] EXECUTOR: $taskId - valueBytes: ${valueBytes.array()}" +
           s" length: ${valueBytes.array().length}" +
           s" as array: ${valueBytes.array()}" +
           s" as array: ${valueBytes.array().mkString(", ")}"

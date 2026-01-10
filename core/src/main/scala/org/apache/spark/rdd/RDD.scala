@@ -347,8 +347,6 @@ abstract class RDD[T: ClassTag](
           stageId = context.stageId,
           partitionId = split.index,
           taskIndex = context.taskIndex(),
-          attempt = context.attemptNumber,
-          taskId = context.taskAttemptId(),
           appName = appName
         )
         Option(context).foreach { ctx =>
@@ -423,8 +421,6 @@ abstract class RDD[T: ClassTag](
           stageId = context.stageId,
           partitionId = split.index,
           taskIndex = context.taskIndex(),
-          attempt = context.attemptNumber,
-          taskId = context.taskAttemptId(),
           appName = appName
         )
         Option(context).foreach { ctx =>

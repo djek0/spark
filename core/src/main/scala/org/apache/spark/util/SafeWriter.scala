@@ -17,30 +17,41 @@
 
 package org.apache.spark.util
 
-import java.io.{BufferedWriter, File, FileWriter, PrintWriter}
+import java.io._
 
 import org.apache.spark.TaskContext
 
 /**
  * A thread-safe writer that ensures resources are properly cleaned up.
  * Implements idempotent close and automatic cleanup on task completion.
+ * Supports both text and binary modes.
+ * Writes to .tmp files that are renamed on commit or deleted on failure.
  *
- * @param file the file to write to
- * @param autoFlush whether to auto-flush after each write
- * @param bufferSize buffer size in bytes (default: 8KB)
+ * @param file the file to write to (should be .tmp)
+ * @param binary if true, uses DataOutputStream for binary; if false, uses PrintWriter for text
  */
 private[spark] class SafeWriter(
     file: File,
-    autoFlush: Boolean = false,
-    bufferSize: Int = 8192) {
+    binary: Boolean = false) {
   
-  private val writer = new PrintWriter(
-    new BufferedWriter(
-      new FileWriter(file, true),
-      bufferSize
-    ),
-    autoFlush
+  // Buffer sizes optimized for different I/O modes
+  private val BINARY_BUFFER_SIZE = 65536  // 64KB for fast binary I/O
+  private val TEXT_BUFFER_SIZE = 8192     // 8KB for text mode
+  
+  private val bufferSize = if (binary) BINARY_BUFFER_SIZE else TEXT_BUFFER_SIZE
+  
+  private val outputStream: OutputStream = new BufferedOutputStream(
+    new FileOutputStream(file, true),
+    bufferSize
   )
+  
+  private val writer: Option[PrintWriter] = if (!binary) {
+    Some(new PrintWriter(outputStream, false))  // autoFlush always false
+  } else None
+  
+  private val dataOut: Option[DataOutputStream] = if (binary) {
+    Some(new DataOutputStream(outputStream))
+  } else None
   
   private val closed = new java.util.concurrent.atomic.AtomicBoolean(false)
   
@@ -52,36 +63,87 @@ private[spark] class SafeWriter(
   /**
    * Thread-safe idempotent close.
    * Safe to call multiple times.
+   * If close fails and file is .tmp, deletes it to prevent corrupt files.
    */
   def safeClose(): Unit = {
     if (closed.compareAndSet(false, true)) {
-      writer.close()
+      var closeFailed = false
+      try {
+        if (binary) {
+          dataOut.foreach(_.flush())
+          dataOut.foreach(_.close())
+        } else {
+          writer.foreach(_.flush())
+          writer.foreach(_.close())
+        }
+      } catch {
+        case e: Exception =>
+          closeFailed = true
+          throw e
+      } finally {
+        try {
+          outputStream.close()
+        } catch {
+          case e: Exception =>
+            closeFailed = true
+            throw e
+        } finally {
+          // If close failed and file is .tmp, delete it
+          if (closeFailed && file.exists() && file.getName.endsWith(".tmp")) {
+            try {
+              file.delete()
+            } catch {
+              case _: Exception => () // Best effort cleanup
+            }
+          }
+        }
+      }
     }
   }
-  
+
   /**
-   * Write a line to the file.
+   * Write a line to the file (text mode only).
    * @throws IllegalStateException if the writer is already closed
    */
   def println(s: String): Unit = {
     if (closed.get()) {
       throw new IllegalStateException(s"Writer for $file is already closed")
     }
-    writer.println(s)
+    writer.foreach(_.println(s))
   }
   
   /**
-   * @return the temporary file being written to
+   * Write a UID and value in the appropriate format.
+   * Binary mode: writes Long + UTF-8 string bytes
+   * Text mode: writes "UID|VALUE\n"
    */
-  def tempFile: File = file
+  def writeEntry(uid: Long, value: Any): Unit = {
+    if (closed.get()) {
+      throw new IllegalStateException(s"Writer for $file is already closed")
+    }
+    
+    if (binary) {
+      dataOut.foreach { out =>
+        out.writeLong(uid)
+        val str = value match {
+          case arr: Array[_] => arr.mkString("[", ",", "]")
+          case other => other.toString
+        }
+        val bytes = str.getBytes("UTF-8")
+        out.writeInt(bytes.length)
+        out.write(bytes)
+      }
+    } else {
+      val valueStr = value match {
+        case arr: Array[_] => arr.mkString("[", ",", "]")
+        case other => other.toString
+      }
+      writer.foreach(_.println(s"$uid|$valueStr"))
+    }
+  }
   
   /**
-   * @return the target log file path (after renaming)
+   * @return the file being written to
    */
-  def logFile: File = new File(file.getPath.replace(".tmp", ".log"))
-  
-  /**
-   * @return whether the writer is closed
-   */
-  def isClosed: Boolean = closed.get()
+  def targetFile: File = file
 }
