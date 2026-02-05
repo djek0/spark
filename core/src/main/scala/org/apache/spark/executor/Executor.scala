@@ -669,9 +669,9 @@ private[spark] class Executor(
         val accumUpdates = task.collectAccumulatorUpdates()
         var metricPeaks = metricsPoller.getTaskMetricPeaks(taskId)  //array[Long]
         
-        // Hash the ENTIRE byte array to detect any modifications
-        // prevent converting to string to avoid overhead
-        val hashValueCandidate = java.util.Arrays.hashCode(valueBytes.array()).toLong
+        // Hash the ENTIRE byte array to detect any modifications using shared utility
+        // This ensures consistency with driver recomputation
+        val hashValueCandidate = TaskResultVerificationManager.computeTaskResultHash(valueBytes).toLong
         metricPeaks = metricPeaks :+ hashValueCandidate
         // TODO: do not serialize value twice
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)

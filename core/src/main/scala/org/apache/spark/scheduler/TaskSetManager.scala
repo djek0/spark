@@ -574,7 +574,7 @@ private[spark] class TaskSetManager(
     // Use real array index (not taskId) for replica pairing
     val stageIndex = (taskSet.stageId, index)
     logInfo(s"[VERIFICATION REGISTER] Registering taskId=${taskId} with stageIndex=${stageIndex} (array index=${index})")
-    TaskResultVerificationManager.addNewRunningTask(taskId.toInt, stageIndex)
+    TaskResultVerificationManager.addNewRunningTask(taskId.toInt, stageIndex, taskSet.tasks(index))
     
     // Do various bookkeeping
     copiesRunning(index) += 1
