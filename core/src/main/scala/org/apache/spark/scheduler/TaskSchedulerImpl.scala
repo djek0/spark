@@ -206,17 +206,17 @@ private[spark] class TaskSchedulerImpl(
   def checkForIllegalTaskAssignment(taskIndex: Long, host: String): Unit = {
     if (taskIndex % 2 == 0) {
       if(taskIdtoHost.contains(taskIndex+1) && taskIdtoHost(taskIndex+1)==host){
-        logError("=============================================")
-        (logError(s"[EXTRA LOG] cannot assigned task-${taskIndex} " +
+        logWarning("=============================================")
+        (logWarning(s"[EXTRA LOG] cannot assigned task-${taskIndex} " +
           s"to host $host because ${taskIndex+1} is already assigned to it!"))
-        logError("=============================================")
+        logWarning("=============================================")
       }
     } else {
       if (taskIdtoHost.contains(taskIndex - 1) && taskIdtoHost(taskIndex - 1) == host) {
-        logError("=============================================")
-        (logError(s"[EXTRA LOG] cannot assigned task-${taskIndex} " +
+        logWarning("=============================================")
+        (logWarning(s"[EXTRA LOG] cannot assigned task-${taskIndex} " +
           s"to host $host because ${taskIndex - 1} is already assigned to it!"))
-        logError("=============================================")
+        logWarning("=============================================")
       }
     }
   }

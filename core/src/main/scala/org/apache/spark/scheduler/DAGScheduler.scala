@@ -1698,6 +1698,28 @@ private[spark] class DAGScheduler(
       event.taskInfo.attemptNumber, // this is a task attempt number
       event.reason)
 
+    // Check if this is a verification task BEFORE checking stage existence
+    // Verification tasks may complete after their stage has finished
+    task match {
+      case vt: VerificationTask =>
+        logInfo(s"[VERIFICATION] VerificationTask ${event.taskInfo.taskId} completed for stage ${task.stageId}, partition ${task.partitionId}")
+        event.reason match {
+          case Success =>
+            // Capture the result and pass to verification manager
+            TaskResultVerificationManager.completeVerificationTask(
+              task.stageId,
+              task.partitionId,
+              event.result
+            )
+          case _ =>
+            logWarning(s"[VERIFICATION] VerificationTask ${event.taskInfo.taskId} failed")
+        }
+        postTaskEnd(event)
+        return
+      case _ =>
+        // Not a verification task, continue normal processing
+    }
+
     if (!stageIdToStage.contains(task.stageId)) {
       // The stage may have already finished when we get this event -- e.g. maybe it was a
       // speculative task. It is important that we send the TaskEnd event in any case, so listeners
@@ -1744,9 +1766,10 @@ private[spark] class DAGScheduler(
 //      }
 //    }
 
+      // Normal task - do consensus verification
       this.synchronized {
         logInfo("Calling verifyResult() from TaskResultVerification")
-        TaskResultVerificationManager.verifyResult(event.taskInfo.taskId.toInt)
+        TaskResultVerificationManager.verifyResult(event.taskInfo.taskId.toInt, taskScheduler)
       }
 
     // Make sure the task's accumulators are updated before any other processing happens, so that

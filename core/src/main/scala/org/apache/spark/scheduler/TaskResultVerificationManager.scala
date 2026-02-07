@@ -20,21 +20,37 @@ object TaskResultVerificationManager extends Logging {
   var stageIndexToResultHash = new HashMap[(Int, Int), String]
   // Track verified partitions to prevent duplicate file verification
   var verifiedPartitions = new HashSet[(Int, Int)]()
+  // Track partitions with verification in progress to prevent duplicate verification tasks
+  var verificationInProgress = new HashSet[(Int, Int)]()
   // Store Task objects for driver recomputation
   var stageIndexToTask = new HashMap[(Int, Int), Task[_]]()
+  // Track which executor ran which task (for third-executor verification)
+  var stageIndexToExecutor = new HashMap[(Int, Int), String]()
+
+  // Configuration: Enable third-executor verification
+  private val useExecutorVerification = envOrElse("EXEC_VERIFICATION", "false").toBoolean
+  private val verificationTimeoutMs = envOrElse("VERIFICATION_TIMEOUT_MS", "5000").toInt
+
+  logInfo(s"[CONFIG] Executor verification enabled: $useExecutorVerification")
+  logInfo(s"[CONFIG] Verification timeout: ${verificationTimeoutMs}ms")
 
   /**
    * Register a task for verification and store it for potential driver recomputation.
    * Merged registration method to avoid HashMap duplication.
+   * @param tid Task ID
+   * @param indexStage Tuple of (stageId, taskIndex)
+   * @param task Task object for recomputation
+   * @param executorId Executor ID where task is running
    */
-  def addNewRunningTask(tid: Int, indexStage: (Int, Int), task: Task[_]): Unit = {
+  def addNewRunningTask(tid: Int, indexStage: (Int, Int), task: Task[_], executorId: String): Unit = {
     if(tidToStageIndexInfo.contains(tid)){
       logDebug(s"Task $tid already registered in verification manager")
       return
     }
-    logDebug(s"Registered task $tid with stage ${indexStage._1}, index ${indexStage._2}")
+    logDebug(s"Registered task $tid with stage ${indexStage._1}, index ${indexStage._2}, executor $executorId")
     tidToStageIndexInfo(tid) = indexStage
     stageIndexToTask(indexStage) = task
+    stageIndexToExecutor(indexStage) = executorId
   }
 
   /**
@@ -61,7 +77,7 @@ object TaskResultVerificationManager extends Logging {
     }
   }
 
-  def verifyResult(tid: Long): Unit = {
+  def verifyResult(tid: Long, taskScheduler: TaskScheduler): Unit = {
     logDebug(s"Verifying result for task $tid")
     if(tidToStageIndexInfo.contains(tid)) {
       val stageIndex = tidToStageIndexInfo(tid)
@@ -95,8 +111,15 @@ object TaskResultVerificationManager extends Logging {
           }
           else{
             logError(s"[X] BYZANTINE FAULT DETECTED: Hash mismatch for stage $stageId, partition $partitionId (indexes ${if (index % 2 == 0) s"$index, $partnerIndex" else s"$partnerIndex, $index"})")
-            // Trigger driver recomputation to determine which replica is correct
-            recomputeOnDriver(stageId, index, partnerIndex, partitionId)
+            
+            // Check if verification already initiated for this partition
+            if (!verificationInProgress.contains(partitionKey)) {
+              verificationInProgress += partitionKey
+              // Dispatch to appropriate verification method based on configuration
+              dispatchVerification(stageId, index, partnerIndex, partitionId, taskScheduler)
+            } else {
+              logDebug(s"[VERIFICATION] Already initiated for partition $partitionId, skipping duplicate")
+            }
           }
         } else {
           logDebug(s"[*] Waiting for partner task $partnerIndex to complete")
@@ -109,9 +132,184 @@ object TaskResultVerificationManager extends Logging {
     }
   }
 
-  def addResultAndVerify(tid: Long, hash: String): Unit={
-    addNewResultForTid(tid,hash)
-    verifyResult(tid)
+  /**
+   * Dispatch verification to appropriate method based on configuration.
+   * - If EXEC_VERIFICATION=true: Attempt third-executor verification with timeout fallback
+   * - If EXEC_VERIFICATION=false: Use driver recomputation (default)
+   */
+  private def dispatchVerification(
+      stageId: Int,
+      index1: Int,
+      index2: Int,
+      partitionId: Int,
+      taskScheduler: TaskScheduler): Unit = {
+    
+    if (useExecutorVerification) {
+      logInfo(s"[VERIFICATION] Using third-executor verification (EXEC_VERIFICATION=true)")
+      verifyOnThirdExecutor(stageId, index1, index2, partitionId, taskScheduler)
+    } else {
+      logInfo(s"[VERIFICATION] Using driver verification (EXEC_VERIFICATION=false)")
+      recomputeOnDriver(stageId, index1, index2, partitionId)
+    }
+  }
+
+  /**
+   * Attempt to verify task result on a third executor (not the ones that ran replicas).
+   * Falls back to driver recomputation on timeout or failure.
+   */
+  private def verifyOnThirdExecutor(
+      stageId: Int,
+      index1: Int,
+      index2: Int,
+      partitionId: Int,
+      taskScheduler: TaskScheduler): Unit = {
+    
+    logInfo(s"[THIRD-EXECUTOR] Starting verification for partition $partitionId")
+    
+    // Get executors that ran the original replicas
+    val executor1 = stageIndexToExecutor.getOrElse((stageId, index1), "unknown")
+    val executor2 = stageIndexToExecutor.getOrElse((stageId, index2), "unknown")
+    val excludedExecutors = Set(executor1, executor2)
+    
+    logInfo(s"[THIRD-EXECUTOR] Excluded executors: $excludedExecutors")
+    
+    // Get the task object
+    val taskOpt = stageIndexToTask.get((stageId, index1))
+      .orElse(stageIndexToTask.get((stageId, index2)))
+    
+    taskOpt match {
+      case None =>
+        logError(s"[X] Task not found, falling back to driver")
+        recomputeOnDriver(stageId, index1, index2, partitionId)
+        
+      case Some(task) =>
+        try {
+          // Submit verification task to scheduler (non-blocking)
+          // Result will be captured in completeVerificationTask when task finishes
+          submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
+          logInfo(s"[THIRD-EXECUTOR] Verification task submitted, will process result when complete")
+          
+        } catch {
+          case e: NotImplementedError =>
+            logWarning(s"[!] ${e.getMessage}, falling back to driver")
+            recomputeOnDriver(stageId, index1, index2, partitionId)
+            
+          case e: Exception =>
+            logError(s"[X] Verification failed: ${e.getMessage}, falling back to driver")
+            recomputeOnDriver(stageId, index1, index2, partitionId)
+        }
+    }
+  }
+
+  // Track metadata for pending verification tasks: (stageId, partitionId) -> (index1, index2)
+  private val pendingVerifications = new HashMap[(Int, Int), (Int, Int)]()
+  
+  /**
+   * Submit verification task to a third executor (with exclusion constraints).
+   * Creates a VerificationTask, wraps it in a TaskSet, and submits to scheduler.
+   * Non-blocking - result will be processed when task completes.
+   */
+  private def submitVerificationTaskToExecutor(
+      task: Task[_],
+      index1: Int,
+      index2: Int,
+      excludedExecutors: Set[String],
+      taskScheduler: TaskScheduler): Unit = {
+    
+    logInfo(s"[THIRD-EXECUTOR] Creating verification task (excluding: $excludedExecutors)")
+    
+    // Get replica hashes to pass to executor
+    val hash1 = stageIndexToResultHash.getOrElse((task.stageId, index1), "MISSING")
+    val hash2 = stageIndexToResultHash.getOrElse((task.stageId, index2), "MISSING")
+    
+    logInfo(s"[THIRD-EXECUTOR] Passing replica hashes to executor: idx$index1=$hash1, idx$index2=$hash2")
+    
+    // Create verification task WITH HASHES
+    val verificationTask = new VerificationTask(
+      stageId = task.stageId,
+      stageAttemptId = task.stageAttemptId,
+      partitionId = task.partitionId,
+      originalTask = task,
+      excludedExecutors = excludedExecutors,
+      replicaIndex1 = index1,
+      replicaIndex2 = index2,
+      replicaHash1 = hash1,
+      replicaHash2 = hash2,
+      localProperties = task.localProperties,
+      serializedTaskMetrics = SparkEnv.get.closureSerializer.newInstance()
+        .serialize(task.metrics).array(),
+      jobId = task.jobId,
+      appId = task.appId,
+      appAttemptId = task.appAttemptId
+    )
+    
+    // Wrap in TaskSet with single task
+    val verificationTaskSet = new TaskSet(
+      tasks = Array(verificationTask),
+      stageId = task.stageId,
+      stageAttemptId = task.stageAttemptId,
+      priority = Int.MaxValue,  // Highest priority
+      properties = task.localProperties,
+      resourceProfileId = 0  // Default resource profile
+    )
+    
+    // Store metadata so we can process result when task completes
+    val partitionKey = (task.stageId, task.partitionId)
+    pendingVerifications(partitionKey) = (index1, index2)
+    
+    logInfo(s"[THIRD-EXECUTOR] Submitting verification TaskSet for stage ${task.stageId}, partition ${task.partitionId}")
+    
+    // Submit to scheduler (non-blocking)
+    taskScheduler.submitTasks(verificationTaskSet)
+  }
+  
+  /**
+   * Complete a verification task and process its result.
+   * Called by DAGScheduler when verification task completes.
+   */
+  def completeVerificationTask(stageId: Int, partitionId: Int, result: Any): Unit = {
+    val partitionKey = (stageId, partitionId)
+    pendingVerifications.get(partitionKey) match {
+      case Some((index1, index2)) =>
+        logInfo(s"[THIRD-EXECUTOR] Verification task for stage $stageId, partition $partitionId completed")
+        // Process the result immediately
+        handleThirdExecutorResult(stageId, index1, index2, partitionId, result)
+        pendingVerifications.remove(partitionKey)
+      case None =>
+        logWarning(s"[THIRD-EXECUTOR] No pending verification found for stage $stageId, partition $partitionId")
+    }
+  }
+
+  /**
+   * Handle result from third-executor verification.
+   * Executor has already computed the verdict, driver just logs it.
+   */
+  private def handleThirdExecutorResult(
+      stageId: Int,
+      index1: Int,
+      index2: Int,
+      partitionId: Int,
+      verifierResult: Any): Unit = {
+    
+    // Cast result to VerificationVerdict
+    verifierResult match {
+      case verdict: VerificationVerdict =>
+        // Executor already computed the verdict!
+        logInfo(s"[THIRD-EXECUTOR] Received verdict from executor:")
+        logInfo(s"[THIRD-EXECUTOR] Verifier hash: ${verdict.verifierHash}")
+        logInfo(s"[THIRD-EXECUTOR] Replica 1 (idx${verdict.replicaIndex1}): ${verdict.replicaHash1}")
+        logInfo(s"[THIRD-EXECUTOR] Replica 2 (idx${verdict.replicaIndex2}): ${verdict.replicaHash2}")
+        logInfo(verdict.logVerdict())
+        
+      case _ =>
+        logError(s"[X] Unexpected result type from verification task: ${verifierResult.getClass}")
+        logError(s"[X] Expected VerificationVerdict, got: $verifierResult")
+    }
+    
+    // Clear verification tracking
+    val partitionKey = (stageId, partitionId)
+    verificationInProgress -= partitionKey
+    logDebug(s"[VERIFICATION] Cleared verification tracking for partition $partitionId")
   }
 
   /**
@@ -186,6 +384,11 @@ object TaskResultVerificationManager extends Logging {
             case (false, false) =>
               logError(s"[X] CRITICAL: Driver result differs from BOTH replicas - system error or driver fault!")
           }
+          
+          // Clear verification tracking
+          val partitionKey = (stageId, partitionId)
+          verificationInProgress -= partitionKey
+          logDebug(s"[VERIFICATION] Cleared verification tracking for partition $partitionId")
           
         } catch {
           case e: Exception =>

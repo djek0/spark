@@ -187,6 +187,34 @@ private[spark] class TaskSetManager(
     (index1 / 2 == index2 / 2) && (index1 % 2 != index2 % 2)
   }
 
+  /**
+   * Check if executor is excluded for verification task.
+   * Verification tasks have a set of excluded executors (those that ran the original replicas).
+   * 
+   * @param index task index in the TaskSet
+   * @param execId executor ID to check
+   * @return true if this executor is excluded for this verification task
+   */
+  private[scheduler] def isExecutorExcludedForVerification(index: Int, execId: String): Boolean = {
+    val isLocalMode = sched.sc.master.startsWith("local")
+    if (isLocalMode) {
+      logInfo(s"[VERIFICATION] Local mode detected - allowing thrird executor on same host")
+      return false  // Don't block same-host scheduling in local mode
+    }
+
+    val task = tasks(index)
+    if (task.isInstanceOf[VerificationTask]) {
+      val verifyTask = task.asInstanceOf[VerificationTask]
+      val isExcluded = verifyTask.excludedExecutors.contains(execId)
+      if (isExcluded) {
+        logDebug(s"[VERIFICATION] Executor $execId excluded for verification task $index")
+      }
+      isExcluded
+    } else {
+      false  // Normal tasks have no executor exclusions
+    }
+  }
+
   private[scheduler] val runningTasksSet = new HashSet[Long]
 
   override def runningTasks: Int = runningTasksSet.size
@@ -356,9 +384,11 @@ private[spark] class TaskSetManager(
       indexOffset -= 1
       val index = list(indexOffset)
       // Task replication: Also check if replica task is on same node
+      // Verification: Also check if executor is excluded for verification tasks
       if (!isTaskExcludededOnExecOrNode(index, execId, host) &&
           !(speculative && hasAttemptOnHost(index, host)) &&
-          !isRelativeOnSameNode(index, host, list_id)) {
+          !isRelativeOnSameNode(index, host, list_id) &&
+          !isExecutorExcludedForVerification(index, execId)) {
         // This should almost always be list.trimEnd(1) to remove tail
         list.remove(indexOffset)
         // Speculatable task should only be launched when at most one copy of the
@@ -573,8 +603,8 @@ private[spark] class TaskSetManager(
     // Task replication: Register with verification manager for consensus checking
     // Use real array index (not taskId) for replica pairing
     val stageIndex = (taskSet.stageId, index)
-    logInfo(s"[VERIFICATION REGISTER] Registering taskId=${taskId} with stageIndex=${stageIndex} (array index=${index})")
-    TaskResultVerificationManager.addNewRunningTask(taskId.toInt, stageIndex, taskSet.tasks(index))
+    logInfo(s"[VERIFICATION REGISTER] Registering taskId=${taskId} with stageIndex=${stageIndex} (array index=${index}), executor=${execId}")
+    TaskResultVerificationManager.addNewRunningTask(taskId.toInt, stageIndex, taskSet.tasks(index), execId)
     
     // Do various bookkeeping
     copiesRunning(index) += 1
