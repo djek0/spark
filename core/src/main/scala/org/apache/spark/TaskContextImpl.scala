@@ -55,9 +55,12 @@ private[spark] class TaskContextImpl(
     @transient private val metricsSystem: MetricsSystem,
     // The default value is only used in tests.
     override val taskMetrics: TaskMetrics = TaskMetrics.empty,
-    override val resources: Map[String, ResourceInformation] = Map.empty)
+    override val resources: Map[String, ResourceInformation] = Map.empty,
+    var targetElementId: Option[Long] = None)
   extends TaskContext
   with Logging {
+
+  override def isVerificationTask: Boolean = targetElementId.isDefined
 
   /** List of callback functions to execute when the task completes. */
   @transient private val onCompleteCallbacks = new ArrayBuffer[TaskCompletionListener]

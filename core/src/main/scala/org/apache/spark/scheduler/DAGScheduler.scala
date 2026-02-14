@@ -2583,6 +2583,8 @@ private[spark] class DAGScheduler(
 
     if (!willRetry) {
       outputCommitCoordinator.stageEnd(stage.id)
+      // Clean up verification manager data structures for this stage
+      TaskResultVerificationManager.cleanupStage(stage.id)
     }
     listenerBus.post(SparkListenerStageCompleted(stage.latestInfo))
     runningStages -= stage

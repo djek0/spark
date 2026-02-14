@@ -85,6 +85,11 @@ private[spark] object Trace extends Logging {
   
   private[rdd] def generateUid(): Long = ctr.getAndIncrement()
 
+  /**
+   * Generate and return next UID without logging (for verification tasks)
+   */
+  def nextUID(): Long = ctr.getAndIncrement()
+
   // track the writers so we can commit their logs all at the end of the task
   private val activeWriters = new java.util.concurrent.ConcurrentHashMap[String, SafeWriter]()
   

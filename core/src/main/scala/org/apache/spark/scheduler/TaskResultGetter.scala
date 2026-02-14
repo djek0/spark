@@ -127,6 +127,16 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
             }
           }
 
+          // Handle special result types for verification system
+          result.value() match {
+            case merkleResult: MerkleTreeBuildResult =>
+              logInfo(s"[MERKLE BUILD] Received tree build result from executor for stage ${merkleResult.stageId}, " +
+                s"idx ${merkleResult.taskIndex}, partition ${merkleResult.partitionId}")
+              TaskResultVerificationManager.storeMerkleTreeBuildResult(merkleResult)
+            case _ =>
+              // Normal task result, continue as usual
+          }
+
           scheduler.handleSuccessfulTask(taskSetManager, tid, result)
         } catch {
           case cnf: ClassNotFoundException =>

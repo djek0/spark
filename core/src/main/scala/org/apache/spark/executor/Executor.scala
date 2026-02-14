@@ -572,7 +572,12 @@ private[spark] class Executor(
          * If we send wrong type we get ClassCastException at runtime
          * So we modify the BYTES (changing the hash) but keep the TYPE structure intact
          */
-        if(honestFlag == "False" && (taskId.toInt == 2 || taskId.toInt == 7)) {
+        // Skip Byzantine behavior for verification tasks (MerkleTreeBuildTask, VerificationTask)
+        // Rational Byzantine executors would never corrupt verification infrastructure
+        val taskClassName = task.getClass.getName
+        val isVerificationTask = taskClassName.contains("MerkleTreeBuildTask") || taskClassName.contains("VerificationTask")
+        
+        if(honestFlag == "False" && (taskId.toInt == 2 || taskId.toInt == 7) && !isVerificationTask) {
           logInfo(s"[BYZANTINE TEST] TRYING TO CHEAT- EXECUTOR: $taskId - injecting different hash but keeping same result type")
 
           val modifiedBytes = valueBytes.array().clone()
@@ -599,6 +604,74 @@ private[spark] class Executor(
           }
           logInfo(s"[BYZANTINE TEST]  EXECUTOR: $taskId - Result bytes length: ${modifiedBytes.length}")
           valueBytes = java.nio.ByteBuffer.wrap(modifiedBytes)
+
+          // Also corrupt the finals file so Merkle tree verification can detect the disagreement
+          // Without this, only the serialized result hash differs but the finals files are identical
+          try {
+            val appName = Option(SparkEnv.get)
+              .flatMap(e => Option(e.conf.get("spark.app.name", "unknown")))
+              .getOrElse("unknown")
+            val userHome = System.getProperty("user.home")
+            val debugMode = sys.props.getOrElse("spark.trace.debugMode", "false").toBoolean
+            val finalDir = if (debugMode) "logs" else "bins"
+            val ext = if (debugMode) ".log" else ".bin"
+            val finalsFile = new java.io.File(
+              s"$userHome/spark/spark-trace/$appName/$finalDir/" +
+              s"spark_finals_stage${task.stageId}_idx${taskDescription.index}_p${task.partitionId}$ext")
+
+            if (finalsFile.exists()) {
+              if (debugMode) {
+                // Text mode: read lines, modify last line's value
+                val src = scala.io.Source.fromFile(finalsFile)
+                val lines = src.getLines().toArray
+                src.close()
+                if (lines.nonEmpty) {
+                  val parts = lines.last.split("\\|", 2)
+                  if (parts.length == 2) {
+                    lines(lines.length - 1) = s"${parts(0)}|BYZANTINE_CORRUPTED"
+                    val pw = new java.io.PrintWriter(finalsFile)
+                    lines.foreach(pw.println)
+                    pw.close()
+                    logInfo(s"[BYZANTINE TEST] Corrupted finals file (text): ${finalsFile.getName}")
+                  }
+                }
+              } else {
+                // Binary mode: parse entries, flip value bytes of the last entry
+                val fileBytes = java.nio.file.Files.readAllBytes(finalsFile.toPath)
+                if (fileBytes.length > 12) { // At least one entry: 8(Long) + 4(Int) + value
+                  var pos = 0
+                  var lastValueStart = -1
+                  var lastValueLen = 0
+                  val buf = java.nio.ByteBuffer.wrap(fileBytes)
+                  while (pos + 12 <= fileBytes.length) {
+                    buf.position(pos)
+                    val _uid = buf.getLong()
+                    val len = buf.getInt()
+                    if (len >= 0 && pos + 12 + len <= fileBytes.length) {
+                      lastValueStart = pos + 12
+                      lastValueLen = len
+                      pos += 12 + len
+                    } else {
+                      pos = fileBytes.length // malformed, stop
+                    }
+                  }
+                  if (lastValueStart >= 0 && lastValueLen > 0) {
+                    for (i <- lastValueStart until (lastValueStart + lastValueLen)) {
+                      fileBytes(i) = (fileBytes(i) ^ 0xFF).toByte
+                    }
+                    java.nio.file.Files.write(finalsFile.toPath, fileBytes)
+                    logInfo(s"[BYZANTINE TEST] Corrupted finals file (binary): ${finalsFile.getName}, " +
+                      s"flipped $lastValueLen value bytes of last entry")
+                  }
+                }
+              }
+            } else {
+              logWarning(s"[BYZANTINE TEST] Finals file not found: ${finalsFile.getAbsolutePath}")
+            }
+          } catch {
+            case e: Exception =>
+              logWarning(s"[BYZANTINE TEST] Failed to corrupt finals file: ${e.getMessage}")
+          }
         }
         logDebug(s"[BYZANTINE TEST] EXECUTOR: $taskId - valueBytes: ${valueBytes.array()}" +
           s" length: ${valueBytes.array().length}" +

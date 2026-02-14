@@ -82,6 +82,8 @@ private[spark] class VerificationTask(
     val replicaIndex2: Int,
     val replicaHash1: String,
     val replicaHash2: String,
+    val targetElementId: Option[Long] = None,  // For single-element verification
+    val merkleLeafHashes: Option[(Int, Int)] = None,  // (leafHash1, leafHash2) for Merkle mode
     localProperties: Properties,
     serializedTaskMetrics: Array[Byte],
     jobId: Option[Int] = None,
@@ -105,40 +107,101 @@ private[spark] class VerificationTask(
    * This ensures all verification logic runs on the executor, not the driver.
    */
   override def runTask(context: TaskContext): VerificationVerdict = {
-    logInfo(s"[VERIFICATION] Running verification task for partition $partitionId on executor ${context.taskAttemptId()}")
+    val modeStr = targetElementId.map(id => s"single-element (UID $id)").getOrElse("full-task")
+    logInfo(s"[VERIFICATION] Running verification task for partition $partitionId on executor ${context.taskAttemptId()} - mode: $modeStr")
     logInfo(s"[VERIFICATION] Excluded executors: $excludedExecutors")
-    logInfo(s"[VERIFICATION] Replica 1 (idx$replicaIndex1) hash: $replicaHash1")
-    logInfo(s"[VERIFICATION] Replica 2 (idx$replicaIndex2) hash: $replicaHash2")
     
-    // Run the original task's computation
-    val result = originalTask.runTask(context)
-    
-    // Hash the result using shared utility
-    val verifierHash = TaskResultVerificationManager.computeTaskResultHash(result)
-    logInfo(s"[VERIFICATION] Verifier hash: $verifierHash")
-    
-    // Determine verdict ON THE EXECUTOR
-    val verdict = (verifierHash == replicaHash1, verifierHash == replicaHash2) match {
-      case (true, false) => "REPLICA_1_CORRECT"
-      case (false, true) => "REPLICA_2_CORRECT"
-      case (true, true) => "BOTH_MATCH"
-      case (false, false) => "NEITHER_MATCH"
+    // Choose verification strategy based on mode
+    (targetElementId, merkleLeafHashes) match {
+      case (Some(uid), Some((leafHash1, leafHash2))) =>
+        // SINGLE-ELEMENT MODE: Compare leaf hashes
+        logInfo(s"[EXECUTOR RECOMPUTE] Single-element mode: UID $uid")
+        logInfo(s"[EXECUTOR RECOMPUTE] Replica 1 (idx$replicaIndex1) leaf hash: $leafHash1")
+        logInfo(s"[EXECUTOR RECOMPUTE] Replica 2 (idx$replicaIndex2) leaf hash: $leafHash2")
+        
+        // Create TaskContext with targetElementId for filtering
+        val filteredContext = new org.apache.spark.TaskContextImpl(
+          stageId = context.stageId(),
+          stageAttemptNumber = context.stageAttemptNumber(),
+          partitionId = context.partitionId(),
+          taskAttemptId = context.taskAttemptId(),
+          attemptNumber = context.attemptNumber(),
+          taskIndex = context.taskIndex(),
+          taskMemoryManager = context.taskMemoryManager(),
+          localProperties = localProperties,
+          metricsSystem = SparkEnv.get.metricsSystem,
+          taskMetrics = context.taskMetrics(),
+          resources = context.resources(),
+          targetElementId = Some(uid)
+        )
+        
+        TaskContext.setTaskContext(filteredContext)
+        val result = originalTask.runTask(filteredContext)
+        
+        // Extract single element and compute leaf hash (same as SafeWriter format)
+        val elementAtUid = result match {
+          case arr: Array[_] if arr.length > 0 => arr(0)
+          case other => other
+        }
+        val verifierValue = elementAtUid match {
+          case arr: Array[_] => arr.mkString("[", ",", "]")
+          case other => other.toString
+        }
+        val verifierLeafHash = verifierValue.hashCode
+        
+        logInfo(s"[VERIFICATION] Verifier leaf hash: $verifierLeafHash")
+        
+        // Compare leaf hashes
+        val verdict = (verifierLeafHash == leafHash1, verifierLeafHash == leafHash2) match {
+          case (true, false) => "REPLICA_1_CORRECT"
+          case (false, true) => "REPLICA_2_CORRECT"
+          case (true, true) => "BOTH_MATCH"
+          case (false, false) => "NEITHER_MATCH"
+        }
+        
+        logInfo(s"[VERIFICATION] Verdict: $verdict")
+        
+        VerificationVerdict(
+          stageId = stageId,
+          partitionId = partitionId,
+          replicaIndex1 = replicaIndex1,
+          replicaIndex2 = replicaIndex2,
+          verifierHash = verifierLeafHash.toString,
+          replicaHash1 = leafHash1.toString,
+          replicaHash2 = leafHash2.toString,
+          verdict = verdict
+        )
+        
+      case _ =>
+        // FULL-TASK MODE: Compare full result hashes
+        logInfo(s"[VERIFICATION] Full-task mode")
+        logInfo(s"[VERIFICATION] Replica 1 (idx$replicaIndex1) hash: $replicaHash1")
+        logInfo(s"[VERIFICATION] Replica 2 (idx$replicaIndex2) hash: $replicaHash2")
+        
+        val result = originalTask.runTask(context)
+        val verifierHash = TaskResultVerificationManager.computeTaskResultHash(result)
+        logInfo(s"[VERIFICATION] Verifier hash: $verifierHash")
+        
+        val verdict = (verifierHash == replicaHash1, verifierHash == replicaHash2) match {
+          case (true, false) => "REPLICA_1_CORRECT"
+          case (false, true) => "REPLICA_2_CORRECT"
+          case (true, true) => "BOTH_MATCH"
+          case (false, false) => "NEITHER_MATCH"
+        }
+        
+        logInfo(s"[VERIFICATION] Verdict: $verdict")
+        
+        VerificationVerdict(
+          stageId = stageId,
+          partitionId = partitionId,
+          replicaIndex1 = replicaIndex1,
+          replicaIndex2 = replicaIndex2,
+          verifierHash = verifierHash,
+          replicaHash1 = replicaHash1,
+          replicaHash2 = replicaHash2,
+          verdict = verdict
+        )
     }
-    
-    logInfo(s"[VERIFICATION] Verdict: $verdict")
-    logInfo(s"[VERIFICATION] Verification task completed for partition $partitionId")
-    
-    // Return verdict object instead of raw result
-    VerificationVerdict(
-      stageId = stageId,
-      partitionId = partitionId,
-      replicaIndex1 = replicaIndex1,
-      replicaIndex2 = replicaIndex2,
-      verifierHash = verifierHash,
-      replicaHash1 = replicaHash1,
-      replicaHash2 = replicaHash2,
-      verdict = verdict
-    )
   }
 
   /**

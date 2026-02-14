@@ -22,17 +22,34 @@ object TaskResultVerificationManager extends Logging {
   var verifiedPartitions = new HashSet[(Int, Int)]()
   // Track partitions with verification in progress to prevent duplicate verification tasks
   var verificationInProgress = new HashSet[(Int, Int)]()
-  // Store Task objects for driver recomputation
-  var stageIndexToTask = new HashMap[(Int, Int), Task[_]]()
+  // Store Task objects for driver recomputation - SEPARATE HASHMAPS to prevent collision
+  var stageIndexToOriginalTask = new HashMap[(Int, Int), Task[_]]()  // User tasks only
+  var stageIndexToVerificationTask = new HashMap[(Int, Int), Task[_]]()  // Verification tasks (MerkleTreeBuildTask, etc.)
   // Track which executor ran which task (for third-executor verification)
   var stageIndexToExecutor = new HashMap[(Int, Int), String]()
+  // Track Merkle tree build results from executors
+  private val merkleTreeBuildResults = new HashMap[String, MerkleTreeBuildResult]()
+  private val merkleTreeBuildLock = new Object()
+
+  // Sealed trait for Merkle tree build outcomes
+  private sealed trait MerkleBuildOutcome
+  private case class BothTreesBuilt(tree1: org.apache.spark.rdd.MerkleTree, tree2: org.apache.spark.rdd.MerkleTree) extends MerkleBuildOutcome
+  private case class EarlyVerdict(correctIndex: Int, byzantineIndex: Int, reason: String) extends MerkleBuildOutcome
 
   // Configuration: Enable third-executor verification
   private val useExecutorVerification = envOrElse("EXEC_VERIFICATION", "false").toBoolean
+  // Configuration: Enable Merkle tree-based verification (find disagreeing element instead of full recompute)
+  private val useMerkleVerification = envOrElse("MERKLE_VERIFICATION", "false").toBoolean
+  // Configuration: Enable executor-based Merkle tree building (Phase 2)
+  private val useExecutorMerkleBuilding = envOrElse("EXECUTOR_MERKLE_BUILD", "true").toBoolean
   private val verificationTimeoutMs = envOrElse("VERIFICATION_TIMEOUT_MS", "5000").toInt
+  private val merkleTreeBuildTimeoutMs = envOrElse("MERKLE_BUILD_TIMEOUT_MS", "30000").toInt
 
   logInfo(s"[CONFIG] Executor verification enabled: $useExecutorVerification")
+  logInfo(s"[CONFIG] Merkle tree verification enabled: $useMerkleVerification")
+  logInfo(s"[CONFIG] Executor Merkle tree building enabled: $useExecutorMerkleBuilding")
   logInfo(s"[CONFIG] Verification timeout: ${verificationTimeoutMs}ms")
+  logInfo(s"[CONFIG] Merkle tree build timeout: ${merkleTreeBuildTimeoutMs}ms")
 
   /**
    * Register a task for verification and store it for potential driver recomputation.
@@ -49,7 +66,19 @@ object TaskResultVerificationManager extends Logging {
     }
     logDebug(s"Registered task $tid with stage ${indexStage._1}, index ${indexStage._2}, executor $executorId")
     tidToStageIndexInfo(tid) = indexStage
-    stageIndexToTask(indexStage) = task
+    
+    // Store in appropriate HashMap based on task type
+    val taskClassName = task.getClass.getName
+    val isVerificationTask = taskClassName.contains("MerkleTreeBuildTask") || taskClassName.contains("VerificationTask")
+    
+    if (isVerificationTask) {
+      stageIndexToVerificationTask(indexStage) = task
+      logDebug(s"Stored as verification task (${task.getClass.getSimpleName})")
+    } else {
+      stageIndexToOriginalTask(indexStage) = task
+      logDebug(s"Stored as original task (${task.getClass.getSimpleName})")
+    }
+    
     stageIndexToExecutor(indexStage) = executorId
   }
 
@@ -67,6 +96,77 @@ object TaskResultVerificationManager extends Logging {
     computeTaskResultHash(valueBytes)
   }
 
+  /**
+   * Clean up task references for a completed partition to prevent memory leaks.
+   * Called after verification completes (consensus or Byzantine resolution).
+   */
+  private def cleanupPartitionTasks(stageId: Int, index1: Int, index2: Int): Unit = {
+    val stageIndex1 = (stageId, index1)
+    val stageIndex2 = (stageId, index2)
+    
+    // Remove original tasks
+    stageIndexToOriginalTask.remove(stageIndex1)
+    stageIndexToOriginalTask.remove(stageIndex2)
+    
+    // Remove verification tasks (if any)
+    stageIndexToVerificationTask.remove(stageIndex1)
+    stageIndexToVerificationTask.remove(stageIndex2)
+    
+    // Remove executor mappings
+    stageIndexToExecutor.remove(stageIndex1)
+    stageIndexToExecutor.remove(stageIndex2)
+    
+    logDebug(s"[CLEANUP] Removed task references for stage $stageId, indexes $index1 and $index2")
+  }
+
+  /**
+   * Clean up all data structures for a completed stage to prevent memory leaks.
+   * Should be called when a stage completes (success or failure).
+   * @param stageId The stage ID to clean up
+   */
+  def cleanupStage(stageId: Int): Unit = {
+    // Remove all task ID mappings for this stage
+    val tidsToRemove = tidToStageIndexInfo.filter(_._2._1 == stageId).keys.toList
+    tidsToRemove.foreach(tidToStageIndexInfo.remove)
+    
+    // Remove all result hashes for this stage
+    val stageIndexesToRemove = stageIndexToResultHash.keys.filter(_._1 == stageId).toList
+    stageIndexesToRemove.foreach(stageIndexToResultHash.remove)
+    
+    // Remove all original tasks for this stage
+    val originalTasksToRemove = stageIndexToOriginalTask.keys.filter(_._1 == stageId).toList
+    originalTasksToRemove.foreach(stageIndexToOriginalTask.remove)
+    
+    // Remove all verification tasks for this stage
+    val verificationTasksToRemove = stageIndexToVerificationTask.keys.filter(_._1 == stageId).toList
+    verificationTasksToRemove.foreach(stageIndexToVerificationTask.remove)
+    
+    // Remove all executor mappings for this stage
+    val executorMappingsToRemove = stageIndexToExecutor.keys.filter(_._1 == stageId).toList
+    executorMappingsToRemove.foreach(stageIndexToExecutor.remove)
+    
+    // Remove all verified partitions for this stage
+    val verifiedToRemove = verifiedPartitions.filter(_._1 == stageId).toList
+    verifiedToRemove.foreach(verifiedPartitions.remove)
+    
+    // Remove all verification in progress for this stage
+    val verificationInProgressToRemove = verificationInProgress.filter(_._1 == stageId).toList
+    verificationInProgressToRemove.foreach(verificationInProgress.remove)
+    
+    // Remove all pending verifications for this stage
+    val pendingToRemove = pendingVerifications.keys.filter(_._1 == stageId).toList
+    pendingToRemove.foreach(pendingVerifications.remove)
+    
+    // Remove all Merkle tree build results for this stage (taskIds contain stage info)
+    // Note: merkleTreeBuildResults uses taskId as key, need to clean based on tidToStageIndexInfo
+    val merkleTaskIdsToRemove = tidsToRemove.map(_.toString)
+    merkleTreeBuildLock.synchronized {
+      merkleTaskIdsToRemove.foreach(merkleTreeBuildResults.remove)
+    }
+    
+    logInfo(s"[CLEANUP] Cleaned up all data structures for stage $stageId")
+  }
+
   def addNewResultForTid(tid: Long, resultHash: String): Unit = {
     if(tidToStageIndexInfo.contains(tid)){
       val stageIndex = tidToStageIndexInfo(tid)
@@ -74,6 +174,43 @@ object TaskResultVerificationManager extends Logging {
       logDebug(s"Stored result hash for task $tid (stage ${stageIndex._1}, index ${stageIndex._2}): $resultHash")
     } else {
       logWarning(s"[!] Task $tid not found in running tasks, cannot store result hash")
+    }
+  }
+
+  /**
+   * Store a Merkle tree build result from an executor.
+   * Called by TaskResultGetter when a MerkleTreeBuildTask completes.
+   */
+  def storeMerkleTreeBuildResult(result: MerkleTreeBuildResult): Unit = {
+    val key = s"${result.stageId}_${result.taskIndex}_${result.partitionId}"
+    merkleTreeBuildLock.synchronized {
+      merkleTreeBuildResults(key) = result
+      merkleTreeBuildLock.notifyAll()
+    }
+    logInfo(s"[MERKLE BUILD] Stored result for stage ${result.stageId}, idx ${result.taskIndex}, " +
+      s"partition ${result.partitionId}: ${result.leafCount} leaves, rootHash=${result.rootHash}")
+  }
+
+  /**
+   * Wait for a Merkle tree build result with timeout.
+   * Returns Some(result) if received, None if timeout.
+   */
+  private def waitForMerkleTreeBuildResult(stageId: Int, taskIndex: Int, partitionId: Int, 
+                                           timeoutMs: Long): Option[MerkleTreeBuildResult] = {
+    val key = s"${stageId}_${taskIndex}_${partitionId}"
+    val deadline = System.currentTimeMillis() + timeoutMs
+    
+    merkleTreeBuildLock.synchronized {
+      while (!merkleTreeBuildResults.contains(key)) {
+        val remaining = deadline - System.currentTimeMillis()
+        if (remaining <= 0) {
+          logWarning(s"[MERKLE BUILD] Timeout waiting for result: stage $stageId, idx $taskIndex, partition $partitionId")
+          return None
+        }
+        merkleTreeBuildLock.wait(remaining)
+      }
+      val result = merkleTreeBuildResults.remove(key)
+      result
     }
   }
 
@@ -104,22 +241,24 @@ object TaskResultVerificationManager extends Logging {
             // Second replica - partition already verified by partner
             logDebug(s"[VERIFY] Partition $partitionId already verified by partner (index $partnerIndex)")
           }
-          
-          // Always check consensus (both replicas should check this)
-          if(stageIndexToResultHash(stageIndex)==stageIndexToResultHash((stageId,partnerIndex))){
-            logInfo(s"[+] CONSENSUS: Valid result for stage $stageId, partition $partitionId (indexes ${if (index % 2 == 0) s"$index, $partnerIndex" else s"$partnerIndex, $index"})")
-          }
-          else{
-            logError(s"[X] BYZANTINE FAULT DETECTED: Hash mismatch for stage $stageId, partition $partitionId (indexes ${if (index % 2 == 0) s"$index, $partnerIndex" else s"$partnerIndex, $index"})")
-            
-            // Check if verification already initiated for this partition
-            if (!verificationInProgress.contains(partitionKey)) {
-              verificationInProgress += partitionKey
+
+
+          // Check if verification already initiated for this partition
+          if (!verificationInProgress.contains(partitionKey)) {
+            verificationInProgress += partitionKey
+            // Always check consensus (both replicas should check this)
+            if(stageIndexToResultHash(stageIndex)==stageIndexToResultHash((stageId,partnerIndex))){
+              logInfo(s"[+] CONSENSUS: Valid result for stage $stageId, partition $partitionId (indexes ${if (index % 2 == 0) s"$index, $partnerIndex" else s"$partnerIndex, $index"})")
+              // Clean up task references after successful consensus
+              cleanupPartitionTasks(stageId, index, partnerIndex)
+            } else {
+              logError(s"[X] BYZANTINE FAULT DETECTED: Hash mismatch for stage $stageId, partition $partitionId (indexes ${if (index % 2 == 0) s"$index, $partnerIndex" else s"$partnerIndex, $index"})")
+
               // Dispatch to appropriate verification method based on configuration
               dispatchVerification(stageId, index, partnerIndex, partitionId, taskScheduler)
-            } else {
-              logDebug(s"[VERIFICATION] Already initiated for partition $partitionId, skipping duplicate")
             }
+          } else {
+            logDebug(s"[VERIFICATION] Already initiated for partition $partitionId, skipping duplicate")
           }
         } else {
           logDebug(s"[*] Waiting for partner task $partnerIndex to complete")
@@ -134,8 +273,12 @@ object TaskResultVerificationManager extends Logging {
 
   /**
    * Dispatch verification to appropriate method based on configuration.
-   * - If EXEC_VERIFICATION=true: Attempt third-executor verification with timeout fallback
-   * - If EXEC_VERIFICATION=false: Use driver recomputation (default)
+   * Two independent config axes:
+   * - EXEC_VERIFICATION: false=driver, true=third-executor
+   * - MERKLE_VERIFICATION: false=full task, true=single element via Merkle tree
+   * 
+   * Merkle trees are ALWAYS built on the original executors (Phase 1: on driver from shared storage).
+   * Comparison and single-element recomputation happens on driver or third executor.
    */
   private def dispatchVerification(
       stageId: Int,
@@ -144,18 +287,21 @@ object TaskResultVerificationManager extends Logging {
       partitionId: Int,
       taskScheduler: TaskScheduler): Unit = {
     
+    logInfo(s"[VERIFICATION] Dispatching: EXEC_VERIFICATION=$useExecutorVerification, MERKLE_VERIFICATION=$useMerkleVerification")
+    
     if (useExecutorVerification) {
-      logInfo(s"[VERIFICATION] Using third-executor verification (EXEC_VERIFICATION=true)")
       verifyOnThirdExecutor(stageId, index1, index2, partitionId, taskScheduler)
     } else {
-      logInfo(s"[VERIFICATION] Using driver verification (EXEC_VERIFICATION=false)")
-      recomputeOnDriver(stageId, index1, index2, partitionId)
+      verifyOnDriver(stageId, index1, index2, partitionId, taskScheduler)
     }
   }
 
   /**
    * Attempt to verify task result on a third executor (not the ones that ran replicas).
-   * Falls back to driver recomputation on timeout or failure.
+   * If MERKLE_VERIFICATION=true: Build Merkle trees on original executors, find disagreeing UID,
+   *   then submit single-element verification to third executor.
+   * If MERKLE_VERIFICATION=false: Submit full task verification to third executor.
+   * Falls back to driver verification on failure.
    */
   private def verifyOnThirdExecutor(
       stageId: Int,
@@ -164,7 +310,7 @@ object TaskResultVerificationManager extends Logging {
       partitionId: Int,
       taskScheduler: TaskScheduler): Unit = {
     
-    logInfo(s"[THIRD-EXECUTOR] Starting verification for partition $partitionId")
+    logInfo(s"[THIRD-EXECUTOR] Starting verification for partition $partitionId (merkle=$useMerkleVerification)")
     
     // Get executors that ran the original replicas
     val executor1 = stageIndexToExecutor.getOrElse((stageId, index1), "unknown")
@@ -173,30 +319,51 @@ object TaskResultVerificationManager extends Logging {
     
     logInfo(s"[THIRD-EXECUTOR] Excluded executors: $excludedExecutors")
     
-    // Get the task object
-    val taskOpt = stageIndexToTask.get((stageId, index1))
-      .orElse(stageIndexToTask.get((stageId, index2)))
+    // Get the task object (only original tasks, not verification tasks)
+    val taskOpt = stageIndexToOriginalTask.get((stageId, index1))
+      .orElse(stageIndexToOriginalTask.get((stageId, index2)))
     
     taskOpt match {
       case None =>
         logError(s"[X] Task not found, falling back to driver")
-        recomputeOnDriver(stageId, index1, index2, partitionId)
+        verifyOnDriver(stageId, index1, index2, partitionId, taskScheduler)
         
       case Some(task) =>
         try {
-          // Submit verification task to scheduler (non-blocking)
-          // Result will be captured in completeVerificationTask when task finishes
-          submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
-          logInfo(s"[THIRD-EXECUTOR] Verification task submitted, will process result when complete")
+          if (useMerkleVerification) {
+            // Step 1: Build Merkle trees and find disagreeing UID + per-tree leaf hashes
+            val disagreement = buildMerkleTreesAndFindDisagreement(stageId, index1, index2, partitionId, taskScheduler)
+            
+            disagreement match {
+              case Some((uid, correctIdx, byzantineIdx)) if uid == -1L =>
+                // Early verdict: one executor timed out during tree building
+                logInfo(s"[THIRD-EXECUTOR] Early verdict received - skipping verification")
+                logInfo(s"[THIRD-EXECUTOR] Replica idx$correctIdx is CORRECT")
+                logInfo(s"[THIRD-EXECUTOR] Replica idx$byzantineIdx is BYZANTINE (timeout)")
+                // Verification complete - no need to submit to third executor
+                
+              case Some((uid, leafHash1, leafHash2)) =>
+                logInfo(s"[THIRD-EXECUTOR] Found disagreement at UID $uid, submitting single-element verification to third executor")
+                submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler, Some(uid), Some((leafHash1, leafHash2)))
+                
+              case None =>
+                logWarning(s"[THIRD-EXECUTOR] Merkle comparison found no disagreement, falling back to full task")
+                submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
+            }
+          } else {
+            // Full task verification on third executor
+            submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
+            logInfo(s"[THIRD-EXECUTOR] Full task verification submitted, will process result when complete")
+          }
           
         } catch {
           case e: NotImplementedError =>
             logWarning(s"[!] ${e.getMessage}, falling back to driver")
-            recomputeOnDriver(stageId, index1, index2, partitionId)
+            verifyOnDriver(stageId, index1, index2, partitionId, taskScheduler)
             
           case e: Exception =>
             logError(s"[X] Verification failed: ${e.getMessage}, falling back to driver")
-            recomputeOnDriver(stageId, index1, index2, partitionId)
+            verifyOnDriver(stageId, index1, index2, partitionId, taskScheduler)
         }
     }
   }
@@ -214,9 +381,12 @@ object TaskResultVerificationManager extends Logging {
       index1: Int,
       index2: Int,
       excludedExecutors: Set[String],
-      taskScheduler: TaskScheduler): Unit = {
+      taskScheduler: TaskScheduler,
+      targetElementId: Option[Long] = None,
+      merkleLeafHashes: Option[(Int, Int)] = None): Unit = {
     
-    logInfo(s"[THIRD-EXECUTOR] Creating verification task (excluding: $excludedExecutors)")
+    val modeStr = targetElementId.map(id => s"single-element (UID $id)").getOrElse("full-task")
+    logInfo(s"[THIRD-EXECUTOR] Creating verification task (excluding: $excludedExecutors) - mode: $modeStr")
     
     // Get replica hashes to pass to executor
     val hash1 = stageIndexToResultHash.getOrElse((task.stageId, index1), "MISSING")
@@ -224,7 +394,7 @@ object TaskResultVerificationManager extends Logging {
     
     logInfo(s"[THIRD-EXECUTOR] Passing replica hashes to executor: idx$index1=$hash1, idx$index2=$hash2")
     
-    // Create verification task WITH HASHES
+    // Create verification task WITH HASHES (and optional single-element parameters)
     val verificationTask = new VerificationTask(
       stageId = task.stageId,
       stageAttemptId = task.stageAttemptId,
@@ -235,6 +405,8 @@ object TaskResultVerificationManager extends Logging {
       replicaIndex2 = index2,
       replicaHash1 = hash1,
       replicaHash2 = hash2,
+      targetElementId = targetElementId,
+      merkleLeafHashes = merkleLeafHashes,
       localProperties = task.localProperties,
       serializedTaskMetrics = SparkEnv.get.closureSerializer.newInstance()
         .serialize(task.metrics).array(),
@@ -306,24 +478,77 @@ object TaskResultVerificationManager extends Logging {
         logError(s"[X] Expected VerificationVerdict, got: $verifierResult")
     }
     
-    // Clear verification tracking
-    val partitionKey = (stageId, partitionId)
-    verificationInProgress -= partitionKey
-    logDebug(s"[VERIFICATION] Cleared verification tracking for partition $partitionId")
+    // Clean up task references (keep verificationInProgress as permanent marker)
+    cleanupPartitionTasks(stageId, index1, index2)
+    logDebug(s"[VERIFICATION] Third-executor verification complete for partition $partitionId")
   }
 
   /**
-   * Recompute task on driver to resolve Byzantine fault.
-   * Runs the task locally on the driver and compares the result hash with both replicas.
+   * Verify task result on driver.
+   * If MERKLE_VERIFICATION=true: Build Merkle trees (from shared storage), find disagreeing UID,
+   *   then recompute single element on driver.
+   * If MERKLE_VERIFICATION=false: Recompute full task on driver.
    */
-  private def recomputeOnDriver(stageId: Int, index1: Int, index2: Int, partitionId: Int): Unit = {
-    logInfo(s"[DRIVER RECOMPUTE] Starting driver recomputation for stage $stageId, partition $partitionId")
+  private def verifyOnDriver(
+      stageId: Int,
+      index1: Int,
+      index2: Int,
+      partitionId: Int,
+      taskScheduler: TaskScheduler): Unit = {
+    
+    logInfo(s"[DRIVER] Starting verification for partition $partitionId (merkle=$useMerkleVerification)")
+    
+    if (useMerkleVerification) {
+      // Build Merkle trees and find disagreeing UID + per-tree leaf hashes
+      val disagreement = buildMerkleTreesAndFindDisagreement(stageId, index1, index2, partitionId, taskScheduler)
+      
+      disagreement match {
+        case Some((uid, correctIdx, byzantineIdx)) if uid == -1L =>
+          // Early verdict: one executor timed out during tree building
+          logInfo(s"[DRIVER] Early verdict received - skipping verification")
+          logInfo(s"[DRIVER] Replica idx$correctIdx is CORRECT")
+          logInfo(s"[DRIVER] Replica idx$byzantineIdx is BYZANTINE (timeout)")
+          // Verification complete - no need to recompute
+          
+        case Some((uid, leafHash1, leafHash2)) =>
+          logInfo(s"[DRIVER] Found disagreement at UID $uid, recomputing single element")
+          executeOnDriver(stageId, index1, index2, partitionId, Some(uid), Some((leafHash1, leafHash2)))
+          
+        case None =>
+          logWarning(s"[DRIVER] Merkle comparison found no disagreement, falling back to full task")
+          executeOnDriver(stageId, index1, index2, partitionId, None, None)
+      }
+    } else {
+      // Full task recomputation on driver
+      executeOnDriver(stageId, index1, index2, partitionId, None, None)
+    }
+  }
+
+  /**
+   * Execute task recomputation on driver and compare result with replicas.
+   * 
+   * @param elementId If specified, only recompute this single element (for Merkle tree verification)
+   * @param merkleLeafHashes If specified, (leafHash1, leafHash2) from Merkle tree comparison.
+   *                         leafHash1 corresponds to index1's tree, leafHash2 to index2's tree.
+   *                         Used for Merkle-compatible comparison instead of full-result hashes.
+   */
+  private def executeOnDriver(
+      stageId: Int, 
+      index1: Int, 
+      index2: Int, 
+      partitionId: Int,
+      elementId: Option[Long] = None,
+      merkleLeafHashes: Option[(Int, Int)] = None): Unit = {
+    
+    val modeStr = elementId.map(id => s"element $id").getOrElse("full task")
+    logInfo(s"[DRIVER RECOMPUTE] Starting driver recomputation for stage $stageId, partition $partitionId ($modeStr)")
     
     val stageIndex1 = (stageId, index1)
     val stageIndex2 = (stageId, index2)
     
     // Get the task object (use either replica's task - they compute same partition)
-    val taskOpt = stageIndexToTask.get(stageIndex1).orElse(stageIndexToTask.get(stageIndex2))
+    // Only retrieve original tasks, not verification tasks
+    val taskOpt = stageIndexToOriginalTask.get(stageIndex1).orElse(stageIndexToOriginalTask.get(stageIndex2))
     
     taskOpt match {
       case None =>
@@ -345,7 +570,8 @@ object TaskResultVerificationManager extends Logging {
             localProperties = task.localProperties,
             metricsSystem = SparkEnv.get.metricsSystem,
             taskMetrics = TaskMetrics.empty,  // Constructor uses taskMetrics, not metrics
-            resources = Map.empty
+            resources = Map.empty,
+            targetElementId = elementId  // Pass element ID for single-element verification
           )
           
           // Set the context
@@ -362,32 +588,64 @@ object TaskResultVerificationManager extends Logging {
               return
           }
           
-          // Hash the driver result using shared utility
-          val driverHash = computeTaskResultHash(driverResult)
-          
-          // Compare with replicas
-          val hash1 = stageIndexToResultHash.getOrElse((stageId, index1), "MISSING")
-          val hash2 = stageIndexToResultHash.getOrElse((stageId, index2), "MISSING")
-          
-          logInfo(s"[DRIVER RECOMPUTE] Driver hash: $driverHash")
-          logInfo(s"[DRIVER RECOMPUTE] Replica 1 (idx$index1) hash: $hash1")
-          logInfo(s"[DRIVER RECOMPUTE] Replica 2 (idx$index2) hash: $hash2")
-          
-          // Determine which replica is correct
-          (driverHash == hash1, driverHash == hash2) match {
-            case (true, false) =>
-              logInfo(s"[✓] VERDICT: Replica 1 (idx$index1) is CORRECT, Replica 2 (idx$index2) is BYZANTINE")
-            case (false, true) =>
-              logInfo(s"[✓] VERDICT: Replica 2 (idx$index2) is CORRECT, Replica 1 (idx$index1) is BYZANTINE")
-            case (true, true) =>
-              logWarning(s"[?] UNEXPECTED: Both replicas match driver, but were reported as different - possible race condition")
-            case (false, false) =>
-              logError(s"[X] CRITICAL: Driver result differs from BOTH replicas - system error or driver fault!")
+          // Choose comparison strategy based on whether we have Merkle leaf hashes
+          (elementId, merkleLeafHashes) match {
+            case (Some(uid), Some((leafHash1, leafHash2))) =>
+              // MERKLE MODE: Extract the single element from driver result
+              // The RDD already filtered to UID via targetElementId, so result contains only that element
+              val elementAtUid = driverResult match {
+                case arr: Array[_] if arr.length > 0 => arr(0)  // Extract first (only) element
+                case other => other
+              }
+              
+              // Format it the same way SafeWriter does
+              val driverValue = elementAtUid match {
+                case arr: Array[_] => arr.mkString("[", ",", "]")
+                case other => other.toString
+              }
+              val driverLeafHash = driverValue.hashCode
+              
+              logInfo(s"[DRIVER RECOMPUTE] Merkle single-element comparison for UID $uid:")
+              logInfo(s"[DRIVER RECOMPUTE]   Driver value: '$driverValue' -> leafHash=$driverLeafHash")
+              logInfo(s"[DRIVER RECOMPUTE]   Replica 1 (idx$index1) leaf hash: $leafHash1")
+              logInfo(s"[DRIVER RECOMPUTE]   Replica 2 (idx$index2) leaf hash: $leafHash2")
+              
+              (driverLeafHash == leafHash1, driverLeafHash == leafHash2) match {
+                case (true, false) =>
+                  logInfo(s"[✓] VERDICT: Replica 1 (idx$index1) is CORRECT, Replica 2 (idx$index2) is BYZANTINE")
+                case (false, true) =>
+                  logInfo(s"[✓] VERDICT: Replica 2 (idx$index2) is CORRECT, Replica 1 (idx$index1) is BYZANTINE")
+                case (true, true) =>
+                  logWarning(s"[?] UNEXPECTED: Both replicas match driver leaf hash - possible hash collision")
+                case (false, false) =>
+                  logError(s"[X] CRITICAL: Driver leaf hash differs from BOTH replicas - system error or driver fault!")
+              }
+              
+            case _ =>
+              // FULL TASK MODE: Compare using serialized result hashes (original logic)
+              val driverHash = computeTaskResultHash(driverResult)
+              val hash1 = stageIndexToResultHash.getOrElse((stageId, index1), "MISSING")
+              val hash2 = stageIndexToResultHash.getOrElse((stageId, index2), "MISSING")
+              
+              logInfo(s"[DRIVER RECOMPUTE] Full-result comparison:")
+              logInfo(s"[DRIVER RECOMPUTE]   Driver hash: $driverHash")
+              logInfo(s"[DRIVER RECOMPUTE]   Replica 1 (idx$index1) hash: $hash1")
+              logInfo(s"[DRIVER RECOMPUTE]   Replica 2 (idx$index2) hash: $hash2")
+              
+              (driverHash == hash1, driverHash == hash2) match {
+                case (true, false) =>
+                  logInfo(s"[✓] VERDICT: Replica 1 (idx$index1) is CORRECT, Replica 2 (idx$index2) is BYZANTINE")
+                case (false, true) =>
+                  logInfo(s"[✓] VERDICT: Replica 2 (idx$index2) is CORRECT, Replica 1 (idx$index1) is BYZANTINE")
+                case (true, true) =>
+                  logWarning(s"[?] UNEXPECTED: Both replicas match driver, but were reported as different - possible race condition")
+                case (false, false) =>
+                  logError(s"[X] CRITICAL: Driver result differs from BOTH replicas - system error or driver fault!")
+              }
           }
           
-          // Clear verification tracking
-          val partitionKey = (stageId, partitionId)
-          verificationInProgress -= partitionKey
+          // Clean up task references (keep verificationInProgress as permanent marker)
+          cleanupPartitionTasks(stageId, index1, index2)
           logDebug(s"[VERIFICATION] Cleared verification tracking for partition $partitionId")
           
         } catch {
@@ -396,6 +654,250 @@ object TaskResultVerificationManager extends Logging {
         } finally {
           TaskContext.unset()
         }
+    }
+  }
+
+  /**
+   * Build Merkle trees from both replica finals files and find the first disagreement.
+   * Phase 1: Builds trees on driver from shared storage (spark-trace).
+   * Phase 2: Submit MerkleTreeBuildTasks to original executors.
+   * 
+   * @return Some((uid, leafHash1, leafHash2)) of the disagreeing element with per-tree leaf hashes,
+   *         Some((-1, correctIndex, byzantineIndex)) for early verdict (timeout case),
+   *         or None if trees match. leafHash1 corresponds to index1's tree, leafHash2 to index2's tree.
+   *         Special case: uid=-1 indicates early verdict, leafHash1=correctIndex, leafHash2=byzantineIndex
+   */
+  private def buildMerkleTreesAndFindDisagreement(
+      stageId: Int,
+      index1: Int,
+      index2: Int,
+      partitionId: Int,
+      taskScheduler: TaskScheduler): Option[(Long, Int, Int)] = {
+    
+    logInfo(s"[MERKLE] Building Merkle trees for stage $stageId, partition $partitionId")
+    logInfo(s"[MERKLE] Building trees for idx$index1 and idx$index2")
+    
+    val executor1 = stageIndexToExecutor.getOrElse((stageId, index1), "unknown")
+    val executor2 = stageIndexToExecutor.getOrElse((stageId, index2), "unknown")
+    logInfo(s"[MERKLE] Original executors: $executor1 (idx$index1), $executor2 (idx$index2)")
+    
+    try {
+      val userHome = System.getProperty("user.home")
+      val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
+      val debugMode = envOrElse("DEBUG_MODE", "false").toBoolean
+      val isBinary = !debugMode
+      val ext = if (debugMode) ".log" else ".bin"
+      val finalDir = if (debugMode) "logs" else "bins"
+      
+      // Finals file paths
+      val finalsPath1 = s"$userHome/spark/spark-trace/$appName/$finalDir/spark_finals_stage${stageId}_idx${index1}_p${partitionId}${ext}"
+      val finalsPath2 = s"$userHome/spark/spark-trace/$appName/$finalDir/spark_finals_stage${stageId}_idx${index2}_p${partitionId}${ext}"
+      
+      // Merkle tree output paths
+      val merkleDir = s"$userHome/spark/spark-trace/$appName/merkle"
+      new java.io.File(merkleDir).mkdirs()
+      val merklePath1 = s"$merkleDir/merkle_stage${stageId}_idx${index1}_p${partitionId}.bin"
+      val merklePath2 = s"$merkleDir/merkle_stage${stageId}_idx${index2}_p${partitionId}.bin"
+      
+      // Check if finals files exist
+      if (!new java.io.File(finalsPath1).exists() || !new java.io.File(finalsPath2).exists()) {
+        logWarning(s"[MERKLE] Finals files not found, cannot build Merkle trees")
+        return None
+      }
+      
+      // Decide whether to build on executors or driver
+      val outcome = if (useExecutorMerkleBuilding) {
+        logInfo(s"[MERKLE] Phase 2: Submitting tree build tasks to executors")
+        buildMerkleTreesOnExecutors(stageId, index1, index2, partitionId, finalsPath1, finalsPath2, isBinary, taskScheduler)
+      } else {
+        logInfo(s"[MERKLE] Phase 1: Building trees on driver")
+        val (tree1, tree2) = buildMerkleTreesOnDriver(finalsPath1, finalsPath2, merklePath1, merklePath2, isBinary)
+        BothTreesBuilt(tree1, tree2)
+      }
+      
+      // Handle outcome
+      outcome match {
+        case EarlyVerdict(correctIdx, byzantineIdx, reason) =>
+          // Early verdict: one executor timed out
+          logInfo(s"[MERKLE] Early verdict triggered: $reason")
+          // Cleanup and return special signal: uid=-1, correctIndex, byzantineIndex
+          new java.io.File(merklePath1).delete()
+          new java.io.File(merklePath2).delete()
+          Some((-1L, correctIdx, byzantineIdx))
+          
+        case BothTreesBuilt(tree1, tree2) =>
+          // Normal case: compare trees
+          logInfo(s"[MERKLE] Comparing trees...")
+          val disagreement = org.apache.spark.rdd.MerkleTree.verify(tree1, tree2)
+          
+          disagreement match {
+            case Some((uid, hash1, hash2)) =>
+              logInfo(s"[MERKLE] Found disagreement at UID $uid (idx$index1 leafHash=$hash1, idx$index2 leafHash=$hash2)")
+            case None =>
+              logWarning(s"[MERKLE] Trees match but hashes differ - possible hash collision or race condition")
+          }
+          
+          // Cleanup Merkle tree files
+          new java.io.File(merklePath1).delete()
+          new java.io.File(merklePath2).delete()
+          logInfo(s"[MERKLE] Cleaned up Merkle tree files")
+          
+          disagreement
+      }
+      
+    } catch {
+      case e: Exception =>
+        logError(s"[MERKLE] Failed to build or compare trees: ${e.getMessage}", e)
+        None
+    }
+  }
+
+  /**
+   * Build Merkle trees on driver by reading finals files from shared storage.
+   * This is the Phase 1 fallback approach.
+   */
+  private def buildMerkleTreesOnDriver(
+      finalsPath1: String,
+      finalsPath2: String,
+      merklePath1: String,
+      merklePath2: String,
+      isBinary: Boolean): (org.apache.spark.rdd.MerkleTree, org.apache.spark.rdd.MerkleTree) = {
+    
+    logInfo(s"[MERKLE] Building tree 1 from $finalsPath1")
+    val tree1 = org.apache.spark.rdd.MerkleTree.buildFromFinalsFile(finalsPath1, isBinary)
+    tree1.saveToFile(merklePath1)
+    logInfo(s"[MERKLE] Tree 1: ${tree1.leafCount} leaves, height=${tree1.height}, rootHash=${tree1.rootHash}")
+    
+    logInfo(s"[MERKLE] Building tree 2 from $finalsPath2")
+    val tree2 = org.apache.spark.rdd.MerkleTree.buildFromFinalsFile(finalsPath2, isBinary)
+    tree2.saveToFile(merklePath2)
+    logInfo(s"[MERKLE] Tree 2: ${tree2.leafCount} leaves, height=${tree2.height}, rootHash=${tree2.rootHash}")
+    
+    (tree1, tree2)
+  }
+
+  /**
+   * Build Merkle trees on executors by submitting MerkleTreeBuildTasks.
+   * Falls back to driver building if submission fails or timeout occurs.
+   * Returns EarlyVerdict if one executor times out (indicating Byzantine behavior).
+   * This is the Phase 2 approach.
+   */
+  private def buildMerkleTreesOnExecutors(
+      stageId: Int,
+      index1: Int,
+      index2: Int,
+      partitionId: Int,
+      finalsPath1: String,
+      finalsPath2: String,
+      isBinary: Boolean,
+      taskScheduler: TaskScheduler): MerkleBuildOutcome = {
+    
+    try {
+      // TaskScheduler passed as parameter
+      try {
+          logInfo(s"[MERKLE] Submitting tree build tasks to executors")
+          
+          // Create MerkleTreeBuildTasks for both replicas
+          val serializedMetrics = SparkEnv.get.closureSerializer.newInstance()
+            .serialize(TaskMetrics.registered).array()
+          
+          val task1 = new MerkleTreeBuildTask(
+            stageId = stageId,
+            stageAttemptId = 0,
+            taskIndex = index1,
+            partitionId = partitionId,
+            finalsFilePath = finalsPath1,
+            isBinary = isBinary,
+            localProperties = new java.util.Properties(),
+            serializedTaskMetrics = serializedMetrics
+          )
+          
+          val task2 = new MerkleTreeBuildTask(
+            stageId = stageId,
+            stageAttemptId = 0,
+            taskIndex = index2,
+            partitionId = partitionId,
+            finalsFilePath = finalsPath2,
+            isBinary = isBinary,
+            localProperties = new java.util.Properties(),
+            serializedTaskMetrics = serializedMetrics
+          )
+          
+          // Submit both tasks as a single TaskSet
+          val taskSet = new TaskSet(
+            tasks = Array(task1, task2),
+            stageId = stageId,
+            stageAttemptId = 0,
+            priority = Int.MaxValue,  // Highest priority
+            properties = new java.util.Properties(),
+            resourceProfileId = 0
+          )
+          
+        logInfo(s"[MERKLE] Submitting TaskSet with 2 tree build tasks")
+        taskScheduler.submitTasks(taskSet)
+        
+        // Wait for results with timeout
+        logInfo(s"[MERKLE] Waiting for tree build results (timeout=${merkleTreeBuildTimeoutMs}ms)")
+        val result1Opt = waitForMerkleTreeBuildResult(stageId, index1, partitionId, merkleTreeBuildTimeoutMs)
+        val result2Opt = waitForMerkleTreeBuildResult(stageId, index2, partitionId, merkleTreeBuildTimeoutMs)
+        
+        // Smart fallback: use partial results if available
+        (result1Opt, result2Opt) match {
+          case (Some(result1), Some(result2)) =>
+            // Both executors responded - proceed with normal comparison
+            logInfo(s"[MERKLE] ✓ Successfully received both tree build results from executors")
+            logInfo(s"[MERKLE] Tree 1: ${result1.leafCount} leaves, rootHash=${result1.rootHash}, buildTime=${result1.buildTimeMs}ms")
+            logInfo(s"[MERKLE] Tree 2: ${result2.leafCount} leaves, rootHash=${result2.rootHash}, buildTime=${result2.buildTimeMs}ms")
+            BothTreesBuilt(result1.tree, result2.tree)
+            
+          case (Some(result1), None) =>
+            // Only executor 1 responded - declare it CORRECT (timeout = Byzantine behavior)
+            logWarning(s"[MERKLE] ⚠ Replica 2 (idx$index2) timed out on tree building")
+            logInfo(s"[✓] EARLY VERDICT: Replica 1 (idx$index1) is CORRECT (responded in ${result1.buildTimeMs}ms)")
+            logInfo(s"[✓] EARLY VERDICT: Replica 2 (idx$index2) is BYZANTINE (timeout = non-responsive)")
+            logInfo(s"[MERKLE] Skipping tree comparison - timeout indicates Byzantine behavior")
+            EarlyVerdict(index1, index2, s"Replica $index2 timed out after ${merkleTreeBuildTimeoutMs}ms")
+            
+          case (None, Some(result2)) =>
+            // Only executor 2 responded - declare it CORRECT (timeout = Byzantine behavior)
+            logWarning(s"[MERKLE] ⚠ Replica 1 (idx$index1) timed out on tree building")
+            logInfo(s"[✓] EARLY VERDICT: Replica 2 (idx$index2) is CORRECT (responded in ${result2.buildTimeMs}ms)")
+            logInfo(s"[✓] EARLY VERDICT: Replica 1 (idx$index1) is BYZANTINE (timeout = non-responsive)")
+            logInfo(s"[MERKLE] Skipping tree comparison - timeout indicates Byzantine behavior")
+            EarlyVerdict(index2, index1, s"Replica $index1 timed out after ${merkleTreeBuildTimeoutMs}ms")
+            
+          case (None, None) =>
+            // Both executors timed out - build on driver and compare
+            logWarning(s"[MERKLE] ✗ Both replicas timed out on tree building, falling back to driver comparison")
+            val userHome = System.getProperty("user.home")
+            val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
+            val merkleDir = s"$userHome/spark/spark-trace/$appName/merkle"
+            val merklePath1 = s"$merkleDir/merkle_stage${stageId}_idx${index1}_p${partitionId}.bin"
+            val merklePath2 = s"$merkleDir/merkle_stage${stageId}_idx${index2}_p${partitionId}.bin"
+            val (tree1, tree2) = buildMerkleTreesOnDriver(finalsPath1, finalsPath2, merklePath1, merklePath2, isBinary)
+            BothTreesBuilt(tree1, tree2)
+        }
+      } catch {
+        case e: Exception =>
+          logError(s"[MERKLE] Task submission failed: ${e.getMessage}, falling back to driver", e)
+          val userHome = System.getProperty("user.home")
+          val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
+          val merkleDir = s"$userHome/spark/spark-trace/$appName/merkle"
+          val merklePath1 = s"$merkleDir/merkle_stage${stageId}_idx${index1}_p${partitionId}.bin"
+          val merklePath2 = s"$merkleDir/merkle_stage${stageId}_idx${index2}_p${partitionId}.bin"
+          val (tree1, tree2) = buildMerkleTreesOnDriver(finalsPath1, finalsPath2, merklePath1, merklePath2, isBinary)
+          BothTreesBuilt(tree1, tree2)
+      }
+    } catch {
+      case e: Exception =>
+        logError(s"[MERKLE] Unexpected error: ${e.getMessage}, falling back to driver", e)
+        val userHome = System.getProperty("user.home")
+        val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
+        val merkleDir = s"$userHome/spark/spark-trace/$appName/merkle"
+        val merklePath1 = s"$merkleDir/merkle_stage${stageId}_idx${index1}_p${partitionId}.bin"
+        val merklePath2 = s"$merkleDir/merkle_stage${stageId}_idx${index2}_p${partitionId}.bin"
+        val (tree1, tree2) = buildMerkleTreesOnDriver(finalsPath1, finalsPath2, merklePath1, merklePath2, isBinary)
+        BothTreesBuilt(tree1, tree2)
     }
   }
 

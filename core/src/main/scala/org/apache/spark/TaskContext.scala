@@ -254,4 +254,10 @@ abstract class TaskContext extends Serializable {
 
   /** Gets local properties set upstream in the driver. */
   private[spark] def getLocalProperties: Properties
+
+  /**
+   * Returns true if this task is running in verification mode (single-element recomputation).
+   * Verification tasks are used to identify Byzantine executors by recomputing specific elements.
+   */
+  private[spark] def isVerificationTask: Boolean = false
 }

@@ -341,7 +341,7 @@ abstract class RDD[T: ClassTag](
       // Get app name safely from SparkEnv
       val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
       println("appName: " + appName)
-      if (isOutermost && !isCollapserRDD) {
+      if (isOutermost && !isCollapserRDD && !context.isVerificationTask) {
         // Open finals writer (one per task), auto-close on completion
         val outWriter = Trace.createOutputWriter(
           stageId = context.stageId,
@@ -414,34 +414,55 @@ abstract class RDD[T: ClassTag](
         // Initialize UID tracking for this stage
         Trace.initForTask()
 
-        // Get app name safely from SparkEnv
-        val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
-        // Create input writer
-        val inputWriter = Trace.createInputWriter(
-          stageId = context.stageId,
-          partitionId = split.index,
-          taskIndex = context.taskIndex(),
-          appName = appName
-        )
-        Option(context).foreach { ctx =>
-          ctx.addTaskCompletionListener[Unit](_ => try {
-            inputWriter.safeClose()
-            Trace.commitLogs(inputWriter)
-          } catch { case _: Throwable => () })
-        }
+        // Check if this is a verification task
+        context match {
+          case ctx: TaskContextImpl if ctx.isVerificationTask && ctx.targetElementId.isDefined =>
+            val isVerificationTask = ctx.isVerificationTask
+            val targetId = ctx.targetElementId.get
+            logInfo(s"[SINGLE-ITERATOR] got in $isVerificationTask with element id $targetId ")
+            // Verification mode: traverse iterator and filter single element by UID
 
-        // Log inputs
-        baseIter.map { value =>
-          // Log input with UID for each element
-          Trace.logInput(
-            inputWriter,
-            context.stageId,
-            split.index,
-            context.taskAttemptId(),
-            context.attemptNumber,
-            value
-          )
-          value // Return the original value unchanged
+            
+            baseIter.flatMap { value =>
+              val currentUid = Trace.nextUID()
+              if (currentUid == targetId) {
+                Some(value)
+              } else {
+                None
+              }
+            }
+          
+          case _ =>
+            // Normal mode: log all elements
+            // Get app name safely from SparkEnv
+            val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
+            // Create input writer
+            val inputWriter = Trace.createInputWriter(
+              stageId = context.stageId,
+              partitionId = split.index,
+              taskIndex = context.taskIndex(),
+              appName = appName
+            )
+            Option(context).foreach { ctx =>
+              ctx.addTaskCompletionListener[Unit](_ => try {
+                inputWriter.safeClose()
+                Trace.commitLogs(inputWriter)
+              } catch { case _: Throwable => () })
+            }
+
+            // Log inputs
+            baseIter.map { value =>
+              // Log input with UID for each element
+              Trace.logInput(
+                inputWriter,
+                context.stageId,
+                split.index,
+                context.taskAttemptId(),
+                context.attemptNumber,
+                value
+              )
+              value // Return the original value unchanged
+            }
         }
       } else {
         baseIter
