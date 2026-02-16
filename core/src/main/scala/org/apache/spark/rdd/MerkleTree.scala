@@ -119,8 +119,14 @@ object MerkleTree extends Logging {
   
   private def findFirstDifference(node1: MerkleNode, node2: MerkleNode): (Long, Int, Int) = {
     (node1, node2) match {
-      case (LeafNode(h1, id1), LeafNode(h2, _)) if h1 != h2 =>
-        (id1, h1, h2)
+      case (LeafNode(h1, id1), LeafNode(h2, id2)) if h1 != h2 =>
+        if (id1 == id2) {
+          // Normal case: same position, different values
+          (id1, h1, h2)
+        } else {
+          // UID mismatch: potential swap attack, signal full task recomputation
+          (-2L, h1, h2)
+        }
       case (LeafNode(_, _), LeafNode(_, _)) =>
         (-1L, 0, 0)
       case (InternalNode(_, l1, r1), InternalNode(_, l2, r2)) =>

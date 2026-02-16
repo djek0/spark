@@ -601,10 +601,16 @@ private[spark] class TaskSetManager(
     }
     
     // Task replication: Register with verification manager for consensus checking
+    // Only register ResultTask and ShuffleMapTask (not verification tasks)
     // Use real array index (not taskId) for replica pairing
-    val stageIndex = (taskSet.stageId, index)
-    logInfo(s"[VERIFICATION REGISTER] Registering taskId=${taskId} with stageIndex=${stageIndex} (array index=${index}), executor=${execId}")
-    TaskResultVerificationManager.addNewRunningTask(taskId.toInt, stageIndex, taskSet.tasks(index), execId)
+    task match {
+      case _: ResultTask[_, _] | _: ShuffleMapTask =>
+        val stageIndex = (taskSet.stageId, index)
+        logInfo(s"[VERIFICATION REGISTER] Registering taskId=${taskId} with stageIndex=${stageIndex} (array index=${index}), executor=${execId}")
+        TaskResultVerificationManager.addNewRunningTask(taskId.toInt, stageIndex, taskSet.tasks(index), execId)
+      case _ =>
+        logDebug(s"[VERIFICATION REGISTER] Skipping registration for verification task ${task.getClass.getSimpleName} (taskId=${taskId})")
+    }
     
     // Do various bookkeeping
     copiesRunning(index) += 1

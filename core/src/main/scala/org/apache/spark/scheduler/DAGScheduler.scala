@@ -1765,12 +1765,16 @@ private[spark] class DAGScheduler(
 //        resultsMap(task.stageId) = HashMap(taskIndex / 2 -> List(event.result.toString));
 //      }
 //    }
+      task match {
+        case _: ResultTask[_, _] | _: ShuffleMapTask =>
+          this.synchronized {
+            logInfo("Calling verifyResult() from TaskResultVerification")
+            TaskResultVerificationManager.verifyResult(event.taskInfo.taskId.toInt, taskScheduler)
+          }
+        case _ =>
+          logDebug(s"[VERIFICATION REGISTER] Skipping verifying result for verification task ${task.getClass.getSimpleName} (taskId=${event.taskInfo.taskId})")
+      }      // Normal task - do consensus verification
 
-      // Normal task - do consensus verification
-      this.synchronized {
-        logInfo("Calling verifyResult() from TaskResultVerification")
-        TaskResultVerificationManager.verifyResult(event.taskInfo.taskId.toInt, taskScheduler)
-      }
 
     // Make sure the task's accumulators are updated before any other processing happens, so that
     // we can post a task end event before any jobs or stages are updated. The accumulators are

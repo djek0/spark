@@ -79,8 +79,17 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
 
 //              println(hashValueCandidate)
 //              println(s"[EXTRA LOG] hash ${hashValueCandidate.hashCode().toString} FOR TID $tid, original byte array size $resultSize")
-              logInfo("Calling addNewResultTasks from task verification manager")
-              TaskResultVerificationManager.addNewResultForTid(tid, hashSize.toString)
+
+              // Only store hash for original tasks (ResultTask, ShuffleMapTask), not verification tasks
+              val taskInfo = taskSetManager.taskInfos(tid)
+              val task = taskSetManager.tasks(taskInfo.index)
+              task match {
+                case _: ResultTask[_, _] | _: ShuffleMapTask =>
+                  logInfo("Calling addNewResultTasks from task verification manager")
+                  TaskResultVerificationManager.addNewResultForTid(tid, hashSize.toString)
+                case _ =>
+                  logDebug(s"[VERIFICATION] Skipping adding result hash for verification task ${task.getClass.getSimpleName} (taskId=$tid)")
+              }
               (directResult, serializedData.limit())
             case IndirectTaskResult(blockId, size) =>
               if (!taskSetManager.canFetchMoreResults(size)) {

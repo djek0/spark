@@ -22,9 +22,8 @@ object TaskResultVerificationManager extends Logging {
   var verifiedPartitions = new HashSet[(Int, Int)]()
   // Track partitions with verification in progress to prevent duplicate verification tasks
   var verificationInProgress = new HashSet[(Int, Int)]()
-  // Store Task objects for driver recomputation - SEPARATE HASHMAPS to prevent collision
-  var stageIndexToOriginalTask = new HashMap[(Int, Int), Task[_]]()  // User tasks only
-  var stageIndexToVerificationTask = new HashMap[(Int, Int), Task[_]]()  // Verification tasks (MerkleTreeBuildTask, etc.)
+  // Store Task objects for driver recomputation (only original tasks, not verification tasks)
+  var stageIndexToOriginalTask = new HashMap[(Int, Int), Task[_]]()
   // Track which executor ran which task (for third-executor verification)
   var stageIndexToExecutor = new HashMap[(Int, Int), String]()
   // Track Merkle tree build results from executors
@@ -40,14 +39,11 @@ object TaskResultVerificationManager extends Logging {
   private val useExecutorVerification = envOrElse("EXEC_VERIFICATION", "false").toBoolean
   // Configuration: Enable Merkle tree-based verification (find disagreeing element instead of full recompute)
   private val useMerkleVerification = envOrElse("MERKLE_VERIFICATION", "false").toBoolean
-  // Configuration: Enable executor-based Merkle tree building (Phase 2)
-  private val useExecutorMerkleBuilding = envOrElse("EXECUTOR_MERKLE_BUILD", "true").toBoolean
   private val verificationTimeoutMs = envOrElse("VERIFICATION_TIMEOUT_MS", "5000").toInt
   private val merkleTreeBuildTimeoutMs = envOrElse("MERKLE_BUILD_TIMEOUT_MS", "30000").toInt
 
   logInfo(s"[CONFIG] Executor verification enabled: $useExecutorVerification")
   logInfo(s"[CONFIG] Merkle tree verification enabled: $useMerkleVerification")
-  logInfo(s"[CONFIG] Executor Merkle tree building enabled: $useExecutorMerkleBuilding")
   logInfo(s"[CONFIG] Verification timeout: ${verificationTimeoutMs}ms")
   logInfo(s"[CONFIG] Merkle tree build timeout: ${merkleTreeBuildTimeoutMs}ms")
 
@@ -66,20 +62,9 @@ object TaskResultVerificationManager extends Logging {
     }
     logDebug(s"Registered task $tid with stage ${indexStage._1}, index ${indexStage._2}, executor $executorId")
     tidToStageIndexInfo(tid) = indexStage
-    
-    // Store in appropriate HashMap based on task type
-    val taskClassName = task.getClass.getName
-    val isVerificationTask = taskClassName.contains("MerkleTreeBuildTask") || taskClassName.contains("VerificationTask")
-    
-    if (isVerificationTask) {
-      stageIndexToVerificationTask(indexStage) = task
-      logDebug(s"Stored as verification task (${task.getClass.getSimpleName})")
-    } else {
-      stageIndexToOriginalTask(indexStage) = task
-      logDebug(s"Stored as original task (${task.getClass.getSimpleName})")
-    }
-    
+    stageIndexToOriginalTask(indexStage) = task
     stageIndexToExecutor(indexStage) = executorId
+    logDebug(s"Stored original task (${task.getClass.getSimpleName})")
   }
 
   /**
@@ -108,9 +93,7 @@ object TaskResultVerificationManager extends Logging {
     stageIndexToOriginalTask.remove(stageIndex1)
     stageIndexToOriginalTask.remove(stageIndex2)
     
-    // Remove verification tasks (if any)
-    stageIndexToVerificationTask.remove(stageIndex1)
-    stageIndexToVerificationTask.remove(stageIndex2)
+    // Verification tasks are not registered, nothing more to remove
     
     // Remove executor mappings
     stageIndexToExecutor.remove(stageIndex1)
@@ -136,11 +119,7 @@ object TaskResultVerificationManager extends Logging {
     // Remove all original tasks for this stage
     val originalTasksToRemove = stageIndexToOriginalTask.keys.filter(_._1 == stageId).toList
     originalTasksToRemove.foreach(stageIndexToOriginalTask.remove)
-    
-    // Remove all verification tasks for this stage
-    val verificationTasksToRemove = stageIndexToVerificationTask.keys.filter(_._1 == stageId).toList
-    verificationTasksToRemove.foreach(stageIndexToVerificationTask.remove)
-    
+
     // Remove all executor mappings for this stage
     val executorMappingsToRemove = stageIndexToExecutor.keys.filter(_._1 == stageId).toList
     executorMappingsToRemove.foreach(stageIndexToExecutor.remove)
@@ -342,6 +321,12 @@ object TaskResultVerificationManager extends Logging {
                 logInfo(s"[THIRD-EXECUTOR] Replica idx$byzantineIdx is BYZANTINE (timeout)")
                 // Verification complete - no need to submit to third executor
                 
+              case Some((uid, leafHash1, leafHash2)) if uid == -2L =>
+                // UID mismatch: potential swap attack detected
+                logWarning(s"[THIRD-EXECUTOR] UID mismatch detected at disagreement point - potential swap attack")
+                logWarning(s"[THIRD-EXECUTOR] Falling back to full task recomputation for security")
+                submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
+                
               case Some((uid, leafHash1, leafHash2)) =>
                 logInfo(s"[THIRD-EXECUTOR] Found disagreement at UID $uid, submitting single-element verification to third executor")
                 submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler, Some(uid), Some((leafHash1, leafHash2)))
@@ -510,6 +495,12 @@ object TaskResultVerificationManager extends Logging {
           logInfo(s"[DRIVER] Replica idx$byzantineIdx is BYZANTINE (timeout)")
           // Verification complete - no need to recompute
           
+        case Some((uid, leafHash1, leafHash2)) if uid == -2L =>
+          // UID mismatch: potential swap attack detected
+          logWarning(s"[DRIVER] UID mismatch detected at disagreement point - potential swap attack")
+          logWarning(s"[DRIVER] Falling back to full task recomputation for security")
+          executeOnDriver(stageId, index1, index2, partitionId, None, None)
+          
         case Some((uid, leafHash1, leafHash2)) =>
           logInfo(s"[DRIVER] Found disagreement at UID $uid, recomputing single element")
           executeOnDriver(stageId, index1, index2, partitionId, Some(uid), Some((leafHash1, leafHash2)))
@@ -659,13 +650,14 @@ object TaskResultVerificationManager extends Logging {
 
   /**
    * Build Merkle trees from both replica finals files and find the first disagreement.
-   * Phase 1: Builds trees on driver from shared storage (spark-trace).
-   * Phase 2: Submit MerkleTreeBuildTasks to original executors.
+   * Always builds on executors (local I/O is faster than driver reading from shared storage).
    * 
    * @return Some((uid, leafHash1, leafHash2)) of the disagreeing element with per-tree leaf hashes,
    *         Some((-1, correctIndex, byzantineIndex)) for early verdict (timeout case),
+   *         Some((-2, leafHash1, leafHash2)) for UID mismatch (potential swap attack),
    *         or None if trees match. leafHash1 corresponds to index1's tree, leafHash2 to index2's tree.
-   *         Special case: uid=-1 indicates early verdict, leafHash1=correctIndex, leafHash2=byzantineIndex
+   *         Special cases: uid=-1 indicates early verdict (leafHash1=correctIndex, leafHash2=byzantineIndex)
+   *                        uid=-2 indicates UID mismatch at disagreement point (swap attack detection)
    */
   private def buildMerkleTreesAndFindDisagreement(
       stageId: Int,
@@ -705,21 +697,16 @@ object TaskResultVerificationManager extends Logging {
         return None
       }
       
-      // Decide whether to build on executors or driver
-      val outcome = if (useExecutorMerkleBuilding) {
-        logInfo(s"[MERKLE] Phase 2: Submitting tree build tasks to executors")
-        buildMerkleTreesOnExecutors(stageId, index1, index2, partitionId, finalsPath1, finalsPath2, isBinary, taskScheduler)
-      } else {
-        logInfo(s"[MERKLE] Phase 1: Building trees on driver")
-        val (tree1, tree2) = buildMerkleTreesOnDriver(finalsPath1, finalsPath2, merklePath1, merklePath2, isBinary)
-        BothTreesBuilt(tree1, tree2)
-      }
+      // Always build trees on executors (files are local there, faster than driver)
+      logInfo(s"[MERKLE] Submitting tree build tasks to executors")
+      val outcome = buildMerkleTreesOnExecutors(stageId, index1, index2, partitionId, finalsPath1, finalsPath2, isBinary, taskScheduler)
       
       // Handle outcome
       outcome match {
         case EarlyVerdict(correctIdx, byzantineIdx, reason) =>
-          // Early verdict: one executor timed out
-          logInfo(s"[MERKLE] Early verdict triggered: $reason")
+          // Executor timed out - declare responsive executor correct
+          logInfo(s"[MERKLE] Executor timeout: $reason")
+          logInfo(s"[MERKLE] Early verdict: responsive executor is correct")
           // Cleanup and return special signal: uid=-1, correctIndex, byzantineIndex
           new java.io.File(merklePath1).delete()
           new java.io.File(merklePath2).delete()
@@ -753,34 +740,9 @@ object TaskResultVerificationManager extends Logging {
   }
 
   /**
-   * Build Merkle trees on driver by reading finals files from shared storage.
-   * This is the Phase 1 fallback approach.
-   */
-  private def buildMerkleTreesOnDriver(
-      finalsPath1: String,
-      finalsPath2: String,
-      merklePath1: String,
-      merklePath2: String,
-      isBinary: Boolean): (org.apache.spark.rdd.MerkleTree, org.apache.spark.rdd.MerkleTree) = {
-    
-    logInfo(s"[MERKLE] Building tree 1 from $finalsPath1")
-    val tree1 = org.apache.spark.rdd.MerkleTree.buildFromFinalsFile(finalsPath1, isBinary)
-    tree1.saveToFile(merklePath1)
-    logInfo(s"[MERKLE] Tree 1: ${tree1.leafCount} leaves, height=${tree1.height}, rootHash=${tree1.rootHash}")
-    
-    logInfo(s"[MERKLE] Building tree 2 from $finalsPath2")
-    val tree2 = org.apache.spark.rdd.MerkleTree.buildFromFinalsFile(finalsPath2, isBinary)
-    tree2.saveToFile(merklePath2)
-    logInfo(s"[MERKLE] Tree 2: ${tree2.leafCount} leaves, height=${tree2.height}, rootHash=${tree2.rootHash}")
-    
-    (tree1, tree2)
-  }
-
-  /**
    * Build Merkle trees on executors by submitting MerkleTreeBuildTasks.
-   * Falls back to driver building if submission fails or timeout occurs.
    * Returns EarlyVerdict if one executor times out (indicating Byzantine behavior).
-   * This is the Phase 2 approach.
+   * Executors have local access to finals files, making this faster than driver-based building.
    */
   private def buildMerkleTreesOnExecutors(
       stageId: Int,
@@ -867,37 +829,22 @@ object TaskResultVerificationManager extends Logging {
             EarlyVerdict(index2, index1, s"Replica $index1 timed out after ${merkleTreeBuildTimeoutMs}ms")
             
           case (None, None) =>
-            // Both executors timed out - build on driver and compare
-            logWarning(s"[MERKLE] ✗ Both replicas timed out on tree building, falling back to driver comparison")
-            val userHome = System.getProperty("user.home")
-            val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
-            val merkleDir = s"$userHome/spark/spark-trace/$appName/merkle"
-            val merklePath1 = s"$merkleDir/merkle_stage${stageId}_idx${index1}_p${partitionId}.bin"
-            val merklePath2 = s"$merkleDir/merkle_stage${stageId}_idx${index2}_p${partitionId}.bin"
-            val (tree1, tree2) = buildMerkleTreesOnDriver(finalsPath1, finalsPath2, merklePath1, merklePath2, isBinary)
-            BothTreesBuilt(tree1, tree2)
+            // Both executors timed out - cannot build trees, must do full task recomputation
+            logWarning(s"[MERKLE] ✗ Both replicas timed out on tree building")
+            logWarning(s"[MERKLE] Cannot determine correct replica from tree building, throwing exception to trigger full task recomputation")
+            throw new RuntimeException("Both executors timed out building Merkle trees - full task recomputation required")
         }
       } catch {
         case e: Exception =>
-          logError(s"[MERKLE] Task submission failed: ${e.getMessage}, falling back to driver", e)
-          val userHome = System.getProperty("user.home")
-          val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
-          val merkleDir = s"$userHome/spark/spark-trace/$appName/merkle"
-          val merklePath1 = s"$merkleDir/merkle_stage${stageId}_idx${index1}_p${partitionId}.bin"
-          val merklePath2 = s"$merkleDir/merkle_stage${stageId}_idx${index2}_p${partitionId}.bin"
-          val (tree1, tree2) = buildMerkleTreesOnDriver(finalsPath1, finalsPath2, merklePath1, merklePath2, isBinary)
-          BothTreesBuilt(tree1, tree2)
+          logError(s"[MERKLE] Task submission failed: ${e.getMessage}", e)
+          logWarning(s"[MERKLE] Throwing exception to trigger full task recomputation")
+          throw new RuntimeException(s"Merkle tree task submission failed: ${e.getMessage}", e)
       }
     } catch {
       case e: Exception =>
-        logError(s"[MERKLE] Unexpected error: ${e.getMessage}, falling back to driver", e)
-        val userHome = System.getProperty("user.home")
-        val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
-        val merkleDir = s"$userHome/spark/spark-trace/$appName/merkle"
-        val merklePath1 = s"$merkleDir/merkle_stage${stageId}_idx${index1}_p${partitionId}.bin"
-        val merklePath2 = s"$merkleDir/merkle_stage${stageId}_idx${index2}_p${partitionId}.bin"
-        val (tree1, tree2) = buildMerkleTreesOnDriver(finalsPath1, finalsPath2, merklePath1, merklePath2, isBinary)
-        BothTreesBuilt(tree1, tree2)
+        logError(s"[MERKLE] Unexpected error: ${e.getMessage}", e)
+        logWarning(s"[MERKLE] Throwing exception to trigger full task recomputation")
+        throw new RuntimeException(s"Merkle tree building failed unexpectedly: ${e.getMessage}", e)
     }
   }
 
