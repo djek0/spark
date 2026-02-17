@@ -38,12 +38,15 @@ object TaskResultVerificationManager extends Logging {
   // Configuration: Enable third-executor verification
   private val useExecutorVerification = envOrElse("EXEC_VERIFICATION", "false").toBoolean
   // Configuration: Enable Merkle tree-based verification (find disagreeing element instead of full recompute)
-  private val useMerkleVerification = envOrElse("MERKLE_VERIFICATION", "false").toBoolean
+  private val useMerkleVerification = envOrElse("MERKLE_VERIFICATION", "true").toBoolean
+  // Configuration: Enable debug mode (verbose logging, file verification, Merkle tree persistence)
+  private val debugMode = envOrElse("DEBUG_MODE", "false").toBoolean
   private val verificationTimeoutMs = envOrElse("VERIFICATION_TIMEOUT_MS", "5000").toInt
   private val merkleTreeBuildTimeoutMs = envOrElse("MERKLE_BUILD_TIMEOUT_MS", "30000").toInt
 
   logInfo(s"[CONFIG] Executor verification enabled: $useExecutorVerification")
   logInfo(s"[CONFIG] Merkle tree verification enabled: $useMerkleVerification")
+  logInfo(s"[CONFIG] Debug mode enabled: $debugMode")
   logInfo(s"[CONFIG] Verification timeout: ${verificationTimeoutMs}ms")
   logInfo(s"[CONFIG] Merkle tree build timeout: ${merkleTreeBuildTimeoutMs}ms")
 
@@ -208,15 +211,15 @@ object TaskResultVerificationManager extends Logging {
         
         if(stageIndexToResultHash.contains((stageId, partnerIndex))){
           // Both replicas completed - check if verification already done
-          if (!verifiedPartitions.contains(partitionKey)) {
-            // First replica to verify this partition - do file verification
+          if (debugMode && !verifiedPartitions.contains(partitionKey)) {
+            // First replica to verify this partition - do file verification (debug mode only)
             verifiedPartitions += partitionKey
             logDebug(s"[VERIFY] First replica (index $index) verifying partition $partitionId")
             verifyReplicaFiles(stageId, 
               if (index % 2 == 0) index else partnerIndex, 
               if (index % 2 == 0) partnerIndex else index, 
               partitionId)
-          } else {
+          } else if (debugMode) {
             // Second replica - partition already verified by partner
             logDebug(s"[VERIFY] Partition $partitionId already verified by partner (index $partnerIndex)")
           }
@@ -681,15 +684,9 @@ object TaskResultVerificationManager extends Logging {
       val ext = if (debugMode) ".log" else ".bin"
       val finalDir = if (debugMode) "logs" else "bins"
       
-      // Finals file paths
+      // Finals file paths (used for building Merkle trees)
       val finalsPath1 = s"$userHome/spark/spark-trace/$appName/$finalDir/spark_finals_stage${stageId}_idx${index1}_p${partitionId}${ext}"
       val finalsPath2 = s"$userHome/spark/spark-trace/$appName/$finalDir/spark_finals_stage${stageId}_idx${index2}_p${partitionId}${ext}"
-      
-      // Merkle tree output paths
-      val merkleDir = s"$userHome/spark/spark-trace/$appName/merkle"
-      new java.io.File(merkleDir).mkdirs()
-      val merklePath1 = s"$merkleDir/merkle_stage${stageId}_idx${index1}_p${partitionId}.bin"
-      val merklePath2 = s"$merkleDir/merkle_stage${stageId}_idx${index2}_p${partitionId}.bin"
       
       // Check if finals files exist
       if (!new java.io.File(finalsPath1).exists() || !new java.io.File(finalsPath2).exists()) {
@@ -707,9 +704,7 @@ object TaskResultVerificationManager extends Logging {
           // Executor timed out - declare responsive executor correct
           logInfo(s"[MERKLE] Executor timeout: $reason")
           logInfo(s"[MERKLE] Early verdict: responsive executor is correct")
-          // Cleanup and return special signal: uid=-1, correctIndex, byzantineIndex
-          new java.io.File(merklePath1).delete()
-          new java.io.File(merklePath2).delete()
+          // Return special signal: uid=-1, correctIndex, byzantineIndex
           Some((-1L, correctIdx, byzantineIdx))
           
         case BothTreesBuilt(tree1, tree2) =>
@@ -723,11 +718,6 @@ object TaskResultVerificationManager extends Logging {
             case None =>
               logWarning(s"[MERKLE] Trees match but hashes differ - possible hash collision or race condition")
           }
-          
-          // Cleanup Merkle tree files
-          new java.io.File(merklePath1).delete()
-          new java.io.File(merklePath2).delete()
-          logInfo(s"[MERKLE] Cleaned up Merkle tree files")
           
           disagreement
       }

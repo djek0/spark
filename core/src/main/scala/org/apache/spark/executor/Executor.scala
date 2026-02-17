@@ -576,7 +576,7 @@ private[spark] class Executor(
         // Rational Byzantine executors would never corrupt verification infrastructure
         val taskClassName = task.getClass.getName
         val isVerificationTask = taskClassName.contains("MerkleTreeBuildTask") || taskClassName.contains("VerificationTask")
-        
+
         if(honestFlag == "False" && (taskId.toInt == 2 || taskId.toInt == 7) && !isVerificationTask) {
           logInfo(s"[BYZANTINE TEST] TRYING TO CHEAT- EXECUTOR: $taskId - injecting different hash but keeping same result type")
 
@@ -612,7 +612,7 @@ private[spark] class Executor(
               .flatMap(e => Option(e.conf.get("spark.app.name", "unknown")))
               .getOrElse("unknown")
             val userHome = System.getProperty("user.home")
-            val debugMode = sys.props.getOrElse("spark.trace.debugMode", "false").toBoolean
+            val debugMode = sys.env.getOrElse("DEBUG_MODE", "false").toBoolean
             val finalDir = if (debugMode) "logs" else "bins"
             val ext = if (debugMode) ".log" else ".bin"
             val finalsFile = new java.io.File(

@@ -424,7 +424,8 @@ abstract class RDD[T: ClassTag](
 
             
             baseIter.flatMap { value =>
-              val currentUid = Trace.nextUID()
+              val currentUid = Trace.generateUid()
+              Trace.enqueueUid(currentUid)  // Enqueue to maintain consistency with normal tasks
               if (currentUid == targetId) {
                 Some(value)
               } else {
@@ -433,35 +434,44 @@ abstract class RDD[T: ClassTag](
             }
           
           case _ =>
-            // Normal mode: log all elements
-            // Get app name safely from SparkEnv
-            val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
-            // Create input writer
-            val inputWriter = Trace.createInputWriter(
-              stageId = context.stageId,
-              partitionId = split.index,
-              taskIndex = context.taskIndex(),
-              appName = appName
-            )
-            Option(context).foreach { ctx =>
-              ctx.addTaskCompletionListener[Unit](_ => try {
-                inputWriter.safeClose()
-                Trace.commitLogs(inputWriter)
-              } catch { case _: Throwable => () })
-            }
-
-            // Log inputs
-            baseIter.map { value =>
-              // Log input with UID for each element
-              Trace.logInput(
-                inputWriter,
-                context.stageId,
-                split.index,
-                context.taskAttemptId(),
-                context.attemptNumber,
-                value
+            // Normal mode: track UIDs and optionally log full input values
+            val debugMode = sys.env.getOrElse("DEBUG_MODE", "false").toBoolean
+            
+            if (debugMode) {
+              // Debug mode: log full input values to disk
+              val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
+              val inputWriter = Trace.createInputWriter(
+                stageId = context.stageId,
+                partitionId = split.index,
+                taskIndex = context.taskIndex(),
+                appName = appName
               )
-              value // Return the original value unchanged
+              Option(context).foreach { ctx =>
+                ctx.addTaskCompletionListener[Unit](_ => try {
+                  inputWriter.safeClose()
+                  Trace.commitLogs(inputWriter)
+                } catch { case _: Throwable => () })
+              }
+
+              baseIter.map { value =>
+                // Log input with UID for each element
+                Trace.logInput(
+                  inputWriter,
+                  context.stageId,
+                  split.index,
+                  context.taskAttemptId(),
+                  context.attemptNumber,
+                  value
+                )
+                value
+              }
+            } else {
+              // Production mode: track UIDs for output correlation, but don't write input values to disk
+              baseIter.map { value =>
+                val uid = Trace.generateUid()
+                Trace.enqueueUid(uid)  // Must enqueue for output correlation
+                value
+              }
             }
         }
       } else {
