@@ -25,7 +25,7 @@ import java.nio.ByteBuffer
 import java.util.{Locale, Properties}
 import java.util.concurrent._
 import java.util.concurrent.atomic.AtomicBoolean
-import java.lang.Boolean;
+
 
 import javax.annotation.concurrent.GuardedBy
 import javax.ws.rs.core.UriBuilder
@@ -36,6 +36,7 @@ import scala.collection.immutable
 import scala.collection.mutable.{ArrayBuffer, HashMap, Map, WrappedArray}
 import scala.concurrent.duration._
 import scala.util.control.NonFatal
+
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder
 import org.slf4j.MDC
@@ -577,7 +578,35 @@ private[spark] class Executor(
         val taskClassName = task.getClass.getName
         val isVerificationTask = taskClassName.contains("MerkleTreeBuildTask") || taskClassName.contains("VerificationTask")
 
-        if(honestFlag == "False" && (taskId.toInt == 2 || taskId.toInt == 7) && !isVerificationTask) {
+        // Read Byzantine interval at task execution time
+        // BYZANTINE_PROBABILITY=N means "every Nth task is Byzantine"
+        // Examples: 2=every 2nd task (50%), 3=every 3rd task (33%), 1=all tasks (100%)
+        val byzantineInterval = sys.env.get("BYZANTINE_PROBABILITY") match {
+          case Some(intervalStr) => 
+            try {
+              val interval = intervalStr.toInt
+              if (interval > 0) {
+                logInfo(s"[BYZANTINE CONFIG] Using interval from ENV: every ${interval}th task is Byzantine")
+                interval
+              } else {
+                logInfo(s"[BYZANTINE CONFIG] Invalid interval '$interval', no Byzantine behavior")
+                0
+              }
+            } catch {
+              case _: NumberFormatException =>
+                logInfo(s"[BYZANTINE CONFIG] Invalid ENV value '$intervalStr', using default Byzantine behavior, every 3rd task is Byzantine")
+                3
+            }
+          case None =>
+              logInfo(s"[BYZANTINE CONFIG] Using default interval : every 3rd task is Byzantine")
+              3
+        }
+        
+        // Use modulo arithmetic for deterministic, evenly-distributed Byzantine selection
+        val shouldBeByzantine = byzantineInterval > 0 && (taskId % byzantineInterval == 0)
+        
+        if(honestFlag == "False" && shouldBeByzantine && !isVerificationTask) {
+          logInfo(s"[BYZANTINE CONFIG] Task $taskId is Byzantine (taskId % $byzantineInterval == 0)")
           logInfo(s"[BYZANTINE TEST] TRYING TO CHEAT- EXECUTOR: $taskId - injecting different hash but keeping same result type")
 
           val modifiedBytes = valueBytes.array().clone()
