@@ -581,25 +581,29 @@ private[spark] class Executor(
         // Read Byzantine interval at task execution time
         // BYZANTINE_PROBABILITY=N means "every Nth task is Byzantine"
         // Examples: 2=every 2nd task (50%), 3=every 3rd task (33%), 1=all tasks (100%)
-        val byzantineInterval = sys.env.get("BYZANTINE_PROBABILITY") match {
-          case Some(intervalStr) => 
-            try {
-              val interval = intervalStr.toInt
-              if (interval > 0) {
-                logInfo(s"[BYZANTINE CONFIG] Using interval from ENV: every ${interval}th task is Byzantine")
-                interval
-              } else {
-                logInfo(s"[BYZANTINE CONFIG] Invalid interval '$interval', no Byzantine behavior")
-                0
+        val byzantineInterval = if (honestFlag == "False") {
+          sys.env.get("BYZANTINE_PROBABILITY") match {
+            case Some(intervalStr) =>
+              try {
+                val interval = intervalStr.toInt
+                if (interval > 0) {
+                  logInfo(s"[BYZANTINE CONFIG] Using interval from ENV: every ${interval}th task is Byzantine")
+                  interval
+                } else {
+                  logInfo(s"[BYZANTINE CONFIG] Invalid interval '$interval', no Byzantine behavior")
+                  0
+                }
+              } catch {
+                case _: NumberFormatException =>
+                  logInfo(s"[BYZANTINE CONFIG] Invalid ENV value '$intervalStr', using default Byzantine behavior, every 3rd task is Byzantine")
+                  3
               }
-            } catch {
-              case _: NumberFormatException =>
-                logInfo(s"[BYZANTINE CONFIG] Invalid ENV value '$intervalStr', using default Byzantine behavior, every 3rd task is Byzantine")
-                3
-            }
-          case None =>
+            case None =>
               logInfo(s"[BYZANTINE CONFIG] Using default interval : every 3rd task is Byzantine")
               3
+          }
+        } else {
+          0   // Honest mode - no Byzantine behavior
         }
         
         // Use modulo arithmetic for deterministic, evenly-distributed Byzantine selection

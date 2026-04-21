@@ -36,7 +36,7 @@ object TaskResultVerificationManager extends Logging {
   private case class EarlyVerdict(correctIndex: Int, byzantineIndex: Int, reason: String) extends MerkleBuildOutcome
 
   // Configuration: Enable third-executor verification
-  private val useExecutorVerification = envOrElse("EXEC_VERIFICATION", "false").toBoolean
+  private val useExecutorVerification = envOrElse("EXEC_VERIFICATION", "true").toBoolean
   // Configuration: Enable Merkle tree-based verification (find disagreeing element instead of full recompute)
   private val useMerkleVerification = envOrElse("MERKLE_VERIFICATION", "true").toBoolean
   // Configuration: Enable debug mode (verbose logging, file verification, Merkle tree persistence)
