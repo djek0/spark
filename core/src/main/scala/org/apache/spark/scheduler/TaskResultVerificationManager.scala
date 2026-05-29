@@ -10,6 +10,7 @@ import scala.collection.mutable.{HashMap, HashSet}
 import org.apache.spark.internal.Logging
 import org.apache.spark.{TaskContext, TaskContextImpl}
 import org.apache.spark.executor.TaskMetrics
+import org.apache.spark.util.FileFormatUtils
 
 
 object TaskResultVerificationManager extends Logging {
@@ -814,16 +815,12 @@ object TaskResultVerificationManager extends Logging {
     logInfo(s"[MERKLE] Original executors: $executor1@$host1 (idx$index1), $executor2@$host2 (idx$index2)")
     
     try {
-      val userHome = System.getProperty("user.home")
       val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
-      val debugMode = envOrElse("DEBUG_MODE", "false").toBoolean
-      val isBinary = !debugMode
-      val ext = if (debugMode) ".log" else ".bin"
-      val finalDir = if (debugMode) "logs" else "bins"
+      val (isBinary, _, _) = FileFormatUtils.getFileFormat(debugMode)  // Use existing constant from line 52
       
       // Finals file paths (used for building Merkle trees)
-      val finalsPath1 = s"$userHome/spark/spark-trace/$appName/$finalDir/spark_finals_stage${stageId}_idx${index1}_p${partitionId}${ext}"
-      val finalsPath2 = s"$userHome/spark/spark-trace/$appName/$finalDir/spark_finals_stage${stageId}_idx${index2}_p${partitionId}${ext}"
+      val finalsPath1 = FileFormatUtils.buildFinalsPath(appName, stageId, index1, partitionId, debugMode)
+      val finalsPath2 = FileFormatUtils.buildFinalsPath(appName, stageId, index2, partitionId, debugMode)
       
       // Check if finals files exist
       if (!new java.io.File(finalsPath1).exists() || !new java.io.File(finalsPath2).exists()) {
@@ -988,18 +985,11 @@ object TaskResultVerificationManager extends Logging {
    */
   private def verifyReplicaFiles(stageId: Int, index1: Int, index2: Int, partitionId: Int): Unit = {
     try {
-      val userHome = System.getProperty("user.home")
       val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
-      val debugMode = envOrElse("DEBUG_MODE", "false").toBoolean
-      val finalDir = if (debugMode) "logs" else "bins"
-      val dir = new File(s"$userHome/spark/spark-trace/$appName/$finalDir")
-
-      // Determine file extension based on mode (committed files, not .tmp)
-      val ext = if (debugMode) ".log" else ".bin"
       
-      // Construct file paths for committed files
-      val file1 = new File(dir, s"spark_finals_stage${stageId}_idx${index1}_p${partitionId}${ext}")
-      val file2 = new File(dir, s"spark_finals_stage${stageId}_idx${index2}_p${partitionId}${ext}")
+      // Use FileFormatUtils to build file paths (uses existing debugMode constant from line 52)
+      val file1 = new File(FileFormatUtils.buildFinalsPath(appName, stageId, index1, partitionId, debugMode))
+      val file2 = new File(FileFormatUtils.buildFinalsPath(appName, stageId, index2, partitionId, debugMode))
       
       if (!file1.exists()) {
         logWarning(s"[!] Replica file not found: ${file1.getAbsolutePath}")

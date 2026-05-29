@@ -48,6 +48,7 @@ import org.apache.spark.internal.config._
 import org.apache.spark.internal.plugin.PluginContainer
 import org.apache.spark.memory.{SparkOutOfMemoryError, TaskMemoryManager}
 import org.apache.spark.metrics.source.JVMCPUSource
+import org.apache.spark.util.FileFormatUtils
 import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.scheduler._
@@ -644,13 +645,9 @@ private[spark] class Executor(
             val appName = Option(SparkEnv.get)
               .flatMap(e => Option(e.conf.get("spark.app.name", "unknown")))
               .getOrElse("unknown")
-            val userHome = System.getProperty("user.home")
             val debugMode = sys.env.getOrElse("DEBUG_MODE", "false").toBoolean
-            val finalDir = if (debugMode) "logs" else "bins"
-            val ext = if (debugMode) ".log" else ".bin"
             val finalsFile = new java.io.File(
-              s"$userHome/spark/spark-trace/$appName/$finalDir/" +
-              s"spark_finals_stage${task.stageId}_idx${taskDescription.index}_p${task.partitionId}$ext")
+              FileFormatUtils.buildFinalsPath(appName, task.stageId, taskDescription.index, task.partitionId, debugMode))
 
             if (finalsFile.exists()) {
               if (debugMode) {
