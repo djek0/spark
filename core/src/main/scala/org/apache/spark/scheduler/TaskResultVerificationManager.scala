@@ -44,6 +44,7 @@ object TaskResultVerificationManager extends Logging {
   private sealed trait MerkleBuildOutcome
   private case class BothTreesBuilt(tree1: org.apache.spark.rdd.MerkleTree, tree2: org.apache.spark.rdd.MerkleTree) extends MerkleBuildOutcome
   private case class EarlyVerdict(correctIndex: Int, byzantineIndex: Int, reason: String) extends MerkleBuildOutcome
+  private case class MerkleBuildFailure(reason: String) extends MerkleBuildOutcome  // Build failed (driver or executor)
 
   // Configuration: Enable third-executor verification
   private val useExecutorVerification = envOrElse("EXEC_VERIFICATION", "true").toBoolean
@@ -55,12 +56,15 @@ object TaskResultVerificationManager extends Logging {
   private val verificationTimeoutMs = envOrElse("VERIFICATION_TIMEOUT_MS", "5000").toInt
   // Merkle tree building timeout: should be much faster than original task (just reading + hashing)
   private val merkleTreeBuildTimeoutMs = envOrElse("MERKLE_BUILD_TIMEOUT_MS", "10000").toInt
+  // Configuration: Build Merkle trees on driver instead of executors (for testing/debugging)
+  private val buildMerkleTreesOnDriver = envOrElse("MERKLE_BUILD_ON_DRIVER", "false").toBoolean
 
   logInfo(s"[CONFIG] Executor verification enabled: $useExecutorVerification")
   logInfo(s"[CONFIG] Merkle tree verification enabled: $useMerkleVerification")
   logInfo(s"[CONFIG] Debug mode enabled: $debugMode")
   logInfo(s"[CONFIG] Verification timeout: ${verificationTimeoutMs}ms")
   logInfo(s"[CONFIG] Merkle tree build timeout: ${merkleTreeBuildTimeoutMs}ms")
+  logInfo(s"[CONFIG] Build Merkle trees on driver: $buildMerkleTreesOnDriver")
 
   /**
    * Register a task for verification and store it for potential driver recomputation.
@@ -828,9 +832,14 @@ object TaskResultVerificationManager extends Logging {
         return None
       }
       
-      // Always build trees on executors (files are local there, faster than driver)
-      logInfo(s"[MERKLE] Submitting tree build tasks to executors")
-      val outcome = buildMerkleTreesOnExecutors(stageId, index1, index2, partitionId, finalsPath1, finalsPath2, isBinary, host1, host2, taskScheduler)
+      // Build Merkle trees - either on driver or executors based on configuration
+      val outcome = if (buildMerkleTreesOnDriver) {
+        logInfo(s"[MERKLE] Building trees on DRIVER (MERKLE_BUILD_ON_DRIVER=true)")
+        buildMerkleTreesOnDriver(stageId, index1, index2, partitionId, finalsPath1, finalsPath2, isBinary)
+      } else {
+        logInfo(s"[MERKLE] Building trees on EXECUTORS (default)")
+        buildMerkleTreesOnExecutors(stageId, index1, index2, partitionId, finalsPath1, finalsPath2, isBinary, host1, host2, taskScheduler)
+      }
       
       // Handle outcome
       outcome match {
@@ -842,7 +851,7 @@ object TaskResultVerificationManager extends Logging {
           Some((-1L, correctIdx, byzantineIdx))
           
         case BothTreesBuilt(tree1, tree2) =>
-          // Normal case: compare trees
+          // Both paths (driver and executor) end up here with trees built
           logInfo(s"[MERKLE] Comparing trees...")
           val disagreement = org.apache.spark.rdd.MerkleTree.verify(tree1, tree2)
           
@@ -854,12 +863,51 @@ object TaskResultVerificationManager extends Logging {
           }
           
           disagreement
+          
+        case MerkleBuildFailure(reason) =>
+          // Build failed (driver or executor)
+          logError(s"[MERKLE] Build failed: $reason")
+          None
       }
       
     } catch {
       case e: Exception =>
         logError(s"[MERKLE] Failed to build or compare trees: ${e.getMessage}", e)
         None
+    }
+  }
+
+  /**
+   * Build Merkle trees directly on the driver by reading finals files.
+   * Alternative to executor-based building, useful for testing/debugging or shared storage scenarios.
+   * Returns BothTreesBuilt with the trees, or MerkleBuildFailure on error.
+   */
+  private def buildMerkleTreesOnDriver(
+      stageId: Int,
+      index1: Int,
+      index2: Int,
+      partitionId: Int,
+      finalsPath1: String,
+      finalsPath2: String,
+      isBinary: Boolean): MerkleBuildOutcome = {
+    
+    logInfo(s"[MERKLE] Building trees on driver for stage $stageId, partition $partitionId")
+    
+    try {
+      // Build both trees directly on driver
+      val tree1 = org.apache.spark.rdd.MerkleTree.buildFromFinalsFile(finalsPath1, isBinary)
+      val tree2 = org.apache.spark.rdd.MerkleTree.buildFromFinalsFile(finalsPath2, isBinary)
+      
+      logInfo(s"[MERKLE] Driver built tree 1: ${tree1.leafCount} leaves, rootHash=${tree1.rootHash}")
+      logInfo(s"[MERKLE] Driver built tree 2: ${tree2.leafCount} leaves, rootHash=${tree2.rootHash}")
+      
+      // Return trees - disagreement finding will happen in common code
+      BothTreesBuilt(tree1, tree2)
+      
+    } catch {
+      case e: Exception =>
+        logError(s"[MERKLE] Failed to build trees on driver: ${e.getMessage}")
+        MerkleBuildFailure(s"Driver tree building failed: ${e.getMessage}")
     }
   }
 
