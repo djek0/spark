@@ -581,7 +581,7 @@ private[spark] class Executor(
         // Read Byzantine interval at task execution time
         // BYZANTINE_PROBABILITY=N means "every Nth task is Byzantine"
         // Examples: 2=every 2nd task (50%), 3=every 3rd task (33%), 1=all tasks (100%)
-        val byzantineInterval = if (honestFlag == "False") {
+        val byzantineInterval = if (honestFlag == "False" && !isVerificationTask) {
           sys.env.get("BYZANTINE_PROBABILITY") match {
             case Some(intervalStr) =>
               try {

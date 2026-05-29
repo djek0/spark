@@ -111,3 +111,10 @@ private[scheduler] case class RegisterMergeStatuses(
 
 private[scheduler] case class ShuffleMergeFinalized(stage: ShuffleMapStage)
   extends DAGSchedulerEvent
+
+private[scheduler] case class VerificationTimeout(
+    stageId: Int,
+    partitionId: Int,
+    delayMs: Int,  // Unused - kept for compatibility, delay handled by messageScheduler
+    scheduledTimestamp: Long)
+  extends DAGSchedulerEvent

@@ -1,0 +1,12 @@
+.git
+.idea
+.bsp
+target
+*/target
+**/*.class
+*.log
+*.iml
+.DS_Store
+spark-trace
+.gitignore
+.gitattributes

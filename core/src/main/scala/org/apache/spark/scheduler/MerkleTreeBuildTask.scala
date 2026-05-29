@@ -38,15 +38,16 @@ case class MerkleTreeBuildResult(
 
 /**
  * A special task used to build Merkle trees on executors.
- * This task reads the finals file from shared storage and builds the Merkle tree
- * on the executor that originally produced the results, then returns the tree to the driver.
+ * This task reads the finals file from local disk and builds the Merkle tree
+ * on the host that originally produced the results, then returns the tree to the driver.
  *
  * @param stageId id of the stage this task belongs to
  * @param stageAttemptId attempt id of the stage
  * @param taskIndex the task index whose results we're building a tree for
  * @param partitionId index of the partition
- * @param finalsFilePath absolute path to the finals file in shared storage
+ * @param finalsFilePath absolute path to the finals file on local disk
  * @param isBinary whether the finals file is in binary format
+ * @param preferredHost host where the finals file is located (for locality scheduling)
  * @param localProperties copy of thread-local properties
  * @param serializedTaskMetrics serialized TaskMetrics
  * @param jobId id of the job
@@ -60,20 +61,21 @@ private[spark] class MerkleTreeBuildTask(
     partitionId: Int,
     val finalsFilePath: String,
     val isBinary: Boolean,
+    val preferredHost: String,
     localProperties: Properties = new Properties,
     serializedTaskMetrics: Array[Byte],
     jobId: Option[Int] = None,
     appId: Option[String] = None,
     appAttemptId: Option[String] = None)
   extends Task[MerkleTreeBuildResult](
-    stageId, 
-    stageAttemptId, 
-    partitionId, 
-    localProperties, 
+    stageId,
+    stageAttemptId,
+    partitionId,
+    localProperties,
     serializedTaskMetrics,
-    jobId, 
-    appId, 
-    appAttemptId, 
+    jobId,
+    appId,
+    appAttemptId,
     isBarrier = false)
   with Serializable with Logging {
 
@@ -83,19 +85,19 @@ private[spark] class MerkleTreeBuildTask(
    */
   override def runTask(context: TaskContext): MerkleTreeBuildResult = {
     val startTime = System.currentTimeMillis()
-    
+
     logInfo(s"[MERKLE BUILD] Building Merkle tree for stage $stageId, task index $taskIndex, " +
       s"partition $partitionId on executor ${context.taskAttemptId()}")
     logInfo(s"[MERKLE BUILD] Reading finals file: $finalsFilePath")
-    
+
     // Build tree from finals file (using existing method)
     val tree = MerkleTree.buildFromFinalsFile(finalsFilePath, isBinary)
-    
+
     val buildTimeMs = System.currentTimeMillis() - startTime
-    
+
     logInfo(s"[MERKLE BUILD] Tree built: ${tree.leafCount} leaves, height=${tree.height}, " +
       s"rootHash=${tree.rootHash}, buildTime=${buildTimeMs}ms")
-    
+
     // Return result with tree and metadata
     MerkleTreeBuildResult(
       stageId = stageId,
@@ -109,10 +111,18 @@ private[spark] class MerkleTreeBuildTask(
   }
 
   /**
-   * No preferred locations - let Spark decide where to run this.
-   * In the future, we could prefer the executor that originally ran taskIndex.
+   * Prefer the host where the finals file is located.
+   * This ensures the task runs on the same host that produced the original results,
+   * allowing fast local disk access to the finals file.
+   * Spark will try NODE_LOCAL first, then fall back to ANY if the host is unavailable.
    */
-  override def preferredLocations: Seq[TaskLocation] = Seq.empty
+  override def preferredLocations: Seq[TaskLocation] = {
+    if (preferredHost != null && preferredHost != "unknown") {
+      Seq(HostTaskLocation(preferredHost))
+    } else {
+      Seq.empty
+    }
+  }
 
   /**
    * Identify this as a Merkle tree build task.

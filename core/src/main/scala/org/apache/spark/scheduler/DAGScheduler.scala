@@ -254,6 +254,15 @@ private[spark] class DAGScheduler(
   var taskPerStage = new HashMap[Int, Int]
   var completedTasksPerStage = new HashMap[Int, Int]
   var partitionPerResultStage = new HashMap[Int, Int] // partitionId => events completed for this partition
+  
+  // Store events waiting for verification verdict: (stageId, partitionId) → (replica1Event, replica2Event)
+  private val pendingVerificationResults = new HashMap[(Int, Int), (CompletionEvent, CompletionEvent)]
+  
+  // Track active timeout timers to enable cancellation: (stageId, partitionId) → timestamp when timeout should fire
+  private val activeTimeouts = new HashMap[(Int, Int), Long]
+  
+  // Track partitions where driver verification is active (last resort - if this fails, abort job)
+  private val driverVerificationActive = new HashMap[(Int, Int), Boolean]
 
   def addPartitionPerResultStage(partitionId: Int): Unit= {
     if (partitionPerResultStage.contains(partitionId)){
@@ -300,6 +309,18 @@ private[spark] class DAGScheduler(
       return (taskPerStage(stage_id) == completedTasksPerStage(stage_id))
     }
     false
+  }
+
+  /**
+   * Check if a stage has any pending verifications that are still in progress.
+   * Used to prevent premature cleanup of stage resources before verification completes.
+   */
+  def hasPendingVerifications(stageId: Int): Boolean = {
+    val pending = pendingVerificationResults.keys.exists(_._1 == stageId)
+    if (pending) {
+      logDebug(s"[VERIFICATION] Stage $stageId has pending verifications, delaying cleanup")
+    }
+    pending
   }
 
   /**
@@ -1716,6 +1737,10 @@ private[spark] class DAGScheduler(
         }
         postTaskEnd(event)
         return
+      case _: MerkleTreeBuildTask =>
+        logInfo(s"[MERKLE] MerkleTreeBuildTask ${event.taskInfo.taskId} completed for stage ${task.stageId}, partition ${task.partitionId}")
+        postTaskEnd(event)
+        return
       case _ =>
         // Not a verification task, continue normal processing
     }
@@ -1768,12 +1793,12 @@ private[spark] class DAGScheduler(
       task match {
         case _: ResultTask[_, _] | _: ShuffleMapTask =>
           this.synchronized {
-            logInfo("Calling verifyResult() from TaskResultVerification")
-            TaskResultVerificationManager.verifyResult(event.taskInfo.taskId.toInt, taskScheduler)
+            logInfo("Checking consensus from TaskResultVerification")
+            TaskResultVerificationManager.checkConsensus(event.taskInfo.taskId.toInt)
           }
         case _ =>
-          logDebug(s"[VERIFICATION REGISTER] Skipping verifying result for verification task ${task.getClass.getSimpleName} (taskId=${event.taskInfo.taskId})")
-      }      // Normal task - do consensus verification
+          logDebug(s"[VERIFICATION REGISTER] Skipping consensus check for verification task ${task.getClass.getSimpleName} (taskId=${event.taskInfo.taskId})")
+      }
 
 
     // Make sure the task's accumulators are updated before any other processing happens, so that
@@ -1830,26 +1855,71 @@ private[spark] class DAGScheduler(
             
             val eventToProcess = (firstSuccess, currentSuccess) match {
               case (true, true) =>
-                // IDEAL CASE: Both replicas succeeded!
-                logInfo(s"[+] Both replicas succeeded for partition $partitionId, Byzantine verification complete")
-                event
+                // Both replicas succeeded - check if consensus already found
+                logInfo(s"[+] Both replicas succeeded for partition $partitionId")
+                
+                // Check if verification already found consensus (hashes match)
+                if (TaskResultVerificationManager.hasConsensus(stageId, partitionId)) {
+                  // Consensus found - hashes match! Proceed immediately without waiting
+                  logInfo(s"[CONSENSUS] Hashes match for partition $partitionId - proceeding without async verification")
+                  
+                  // Clean up the consensus flag
+                  TaskResultVerificationManager.cleanupConsensusFlag(stageId, partitionId)
+                  
+                  // Use first replica (arbitrary choice since both are correct)
+                  firstEvent
+                } else {
+                  // No consensus - hashes differ (Byzantine fault detected)
+                  logInfo(s"[VERIFICATION] Byzantine fault detected, storing events and waiting for verdict")
+                  
+                  // Store both events for verdict-based selection
+                  pendingVerificationResults((stageId, partitionId)) = (firstEvent, event)
+                  
+                  // Start timeout timer for verification (includes Merkle tree building in parallel)
+                  // Merkle build (10s parallel) + third executor (5s) + margin (5s) = 20s
+                  val timeoutMs = sc.getConf.get("spark.verification.timeout", "20000").toInt
+                  val timeoutTimestamp = System.currentTimeMillis() + timeoutMs
+                  activeTimeouts((stageId, partitionId)) = timeoutTimestamp
+                  
+                  // Schedule timeout using messageScheduler (non-blocking)
+                  messageScheduler.schedule(
+                    new Runnable {
+                      override def run(): Unit = {
+                        eventProcessLoop.post(VerificationTimeout(stageId, partitionId, 0, timeoutTimestamp))
+                      }
+                    },
+                    timeoutMs,
+                    java.util.concurrent.TimeUnit.MILLISECONDS
+                  )
+                  
+                  // NOW dispatch verification AFTER pending verification is stored
+                  // This prevents race condition where driver verification completes before pending entry exists
+                  logInfo("Dispatching verifyResult() after batching complete")
+                  TaskResultVerificationManager.verifyResult(firstEvent.taskInfo.taskId.toInt, taskScheduler)
+                  
+                  // Return early - will resume when verdict arrives via completeVerificationWithVerdict()
+                  return
+                }
+                
               case (true, false) =>
-                // FALLBACK: First succeeded, current failed
+                // Only first succeeded - use it directly (no verification needed)
                 logWarning(s"[!] Replica task ${event.taskInfo.taskId} failed: ${event.reason.getClass.getSimpleName}")
                 logInfo(s"[+] Using successful replica task ${firstEvent.taskInfo.taskId} (Byzantine resilience)")
                 firstEvent
+                
               case (false, true) =>
-                // FALLBACK: Current succeeded, first failed
+                // Only current succeeded - use it directly
                 logWarning(s"[!] Replica task ${firstEvent.taskInfo.taskId} failed")
                 logInfo(s"[+] Using successful replica task ${event.taskInfo.taskId} (Byzantine resilience)")
                 event
+                
               case (false, false) =>
-                // ERROR: Both failed!
+                // Both failed
                 logError(s"[X] Both replicas failed for partition $partitionId, cannot complete partition")
-                return  // Both failed, return early
+                return
             }
             
-            // Continue processing with the successful event
+            // Continue processing with the successful event (only reaches here when only one replica succeeded)
             if (eventToProcess != event) {
               // Need to reprocess with the first event instead
               logDebug(s"Switching to process first event for job completion")
@@ -1908,8 +1978,8 @@ private[spark] class DAGScheduler(
                   val canFinish = canMarkStageAsFinished(stageId)
                   logDebug(s"canMarkStageAsFinished($stageId)=$canFinish")
 //                  if (job.numFinished == job.numPartitions) {
-                  if(canFinish){
-                    logInfo(s"[+] Job ${job.jobId} finishing, all tasks complete")
+                  if(canFinish && !hasPendingVerifications(stageId)){
+                    logInfo(s"[+] Job ${job.jobId} finishing, all tasks complete and no pending verifications")
                     markStageAsFinished(resultStage)
                     cancelRunningIndependentStages(job, s"Job ${job.jobId} is finished.")
                     cleanupStateForJobAndIndependentStages(job)
@@ -2276,6 +2346,264 @@ private[spark] class DAGScheduler(
         println(s"[DEBUG] ❌ Event reason is ExecutorLostFailure/UnknownReason for taskId=${event.taskInfo.taskId}")
         // Unrecognized failure - also do nothing. If the task fails repeatedly, the TaskScheduler
         // will abort the job.
+    }
+  }
+
+  /**
+   * Called when verification verdict is ready (from driver or third executor).
+   * Selects the correct replica based on verdict and commits result to job.
+   * 
+   * @param stageId Stage ID
+   * @param index1 First replica task index
+   * @param index2 Second replica task index  
+   * @param partitionId Partition ID
+   * @param verdict "REPLICA_1_CORRECT", "REPLICA_2_CORRECT", "BOTH_MATCH", "NEITHER_MATCH"
+   * @param verifierResult Optional driver recomputation result (for NEITHER_MATCH from driver)
+   */
+  def completeVerificationWithVerdict(
+      stageId: Int,
+      index1: Int,
+      index2: Int,
+      partitionId: Int,
+      verdict: String,
+      verifierResult: Option[Any] = None): Unit = {
+    
+    this.synchronized {
+      logInfo(s"[VERIFICATION COMPLETE] Stage $stageId, partition $partitionId: verdict=$verdict")
+      
+      pendingVerificationResults.get((stageId, partitionId)) match {
+        case Some((replica1Event, replica2Event)) =>
+          
+          // Select correct event based on verdict
+          val correctEvent = verdict match {
+            case "REPLICA_1_CORRECT" =>
+              logInfo(s"[✓] Using Replica 1 (taskId=${replica1Event.taskInfo.taskId}, idx=$index1)")
+              replica1Event
+              
+            case "REPLICA_2_CORRECT" =>
+              logInfo(s"[✓] Using Replica 2 (taskId=${replica2Event.taskInfo.taskId}, idx=$index2)")
+              replica2Event
+              
+            case "BOTH_MATCH" =>
+              logInfo(s"[✓] Both replicas match, using Replica 1 (taskId=${replica1Event.taskInfo.taskId})")
+              replica1Event
+              
+            case "NEITHER_MATCH" =>
+              logWarning(s"[!] NEITHER replica matches verifier")
+              verifierResult match {
+                case Some(driverResult) =>
+                  logInfo(s"[+] Using driver recomputation result as ground truth")
+                  // Create synthetic event with driver result
+                  createEventWithDriverResult(replica1Event, driverResult)
+                  
+                case None =>
+                  logError(s"[X] CRITICAL: NEITHER_MATCH but no driver result available")
+                  logError(s"[X] Defaulting to Replica 1 as fallback (result may be incorrect)")
+                  replica1Event
+              }
+              
+            case unknown =>
+              logError(s"[X] Unknown verdict: $unknown, defaulting to Replica 1")
+              replica1Event
+          }
+          
+          // Clean up pending verification, timeout, and driver verification flag
+          pendingVerificationResults.remove((stageId, partitionId))
+          activeTimeouts.remove((stageId, partitionId))
+          driverVerificationActive.remove((stageId, partitionId))
+          
+          // Commit the CORRECT result to the job
+          // Use bypassBatching=true because we already have both events and selected the correct one
+          logInfo(s"[VERIFICATION COMPLETE] Committing result for partition $partitionId")
+          handleTaskCompletion(correctEvent, bypassBatching = true)
+          
+          // Check if stage can now be finished (all verifications complete)
+          if (canMarkStageAsFinished(stageId) && !hasPendingVerifications(stageId)) {
+            stageIdToStage.get(stageId).foreach { stage =>
+              stage match {
+                case resultStage: ResultStage =>
+                  resultStage.activeJob.foreach { job =>
+                    logInfo(s"[+] Job ${job.jobId} finishing after verification complete, all tasks done and no pending verifications")
+                    markStageAsFinished(resultStage)
+                    cancelRunningIndependentStages(job, s"Job ${job.jobId} is finished.")
+                    cleanupStateForJobAndIndependentStages(job)
+                    listenerBus.post(
+                      SparkListenerJobEnd(job.jobId, clock.getTimeMillis(), JobSucceeded))
+                  }
+                case _ => // Ignore non-ResultStage
+              }
+            }
+          }
+          
+        case None =>
+          logWarning(s"[!] No pending verification found for stage $stageId, partition $partitionId")
+          logWarning(s"[!] Verification may have timed out or events were already processed")
+      }
+    }
+  }
+
+  /**
+   * Create a CompletionEvent using driver recomputation result.
+   * Reuses metadata from baseEvent but replaces the result.
+   */
+  private def createEventWithDriverResult(baseEvent: CompletionEvent, driverResult: Any): CompletionEvent = {
+    logDebug(s"[DRIVER RESULT] Creating event with driver-computed result")
+    CompletionEvent(
+      task = baseEvent.task,
+      reason = baseEvent.reason,
+      result = driverResult,
+      accumUpdates = baseEvent.accumUpdates,
+      metricPeaks = baseEvent.metricPeaks,
+      taskInfo = baseEvent.taskInfo
+    )
+  }
+
+  /**
+   * Handle verification timeout - called when verification doesn't complete in time.
+   * First timeout: fall back to driver recomputation.
+   * Second timeout (driver): abort job - no trusted result available.
+   * Checks if timeout is still active (not cancelled) before triggering.
+   */
+  def handleVerificationTimeout(stageId: Int, partitionId: Int, scheduledTimestamp: Long): Unit = {
+    this.synchronized {
+      // Check if this timeout is still active (hasn't been cancelled)
+      activeTimeouts.get((stageId, partitionId)) match {
+        case Some(currentTimestamp) if currentTimestamp == scheduledTimestamp =>
+          
+          pendingVerificationResults.get((stageId, partitionId)) match {
+            case Some((replica1Event, replica2Event)) =>
+              
+              // Check if this is a driver verification timeout (last resort)
+              if (driverVerificationActive.getOrElse((stageId, partitionId), false)) {
+                // SECOND TIMEOUT: Driver recomputation timed out - ABORT JOB
+                logError(s"[TIMEOUT] Driver recomputation timed out for stage $stageId, partition $partitionId")
+                logError(s"[TIMEOUT] No trusted result available - Byzantine verification FAILED")
+                
+                // Clean up all tracking
+                pendingVerificationResults.remove((stageId, partitionId))
+                activeTimeouts.remove((stageId, partitionId))
+                driverVerificationActive.remove((stageId, partitionId))
+                
+                // Abort all dependent jobs - driver is last resort, no fallback available
+                val stage = stageIdToStage.get(stageId)
+                stage match {
+                  case Some(s) =>
+                    val reason = s"Byzantine verification failed: Driver recomputation timed out for partition $partitionId. " +
+                      s"This indicates either system degradation or persistent Byzantine behavior."
+                    logError(s"[TIMEOUT] Aborting all jobs depending on stage $stageId")
+                    abortStage(s, reason, None)
+                    
+                  case None =>
+                    logError(s"[TIMEOUT] Cannot abort - stage $stageId not found")
+                }
+                
+              } else {
+                // FIRST TIMEOUT: Verification timed out - fall back to driver recomputation
+                logWarning(s"[TIMEOUT] Verification timed out for stage $stageId, partition $partitionId")
+                logWarning(s"[TIMEOUT] Cannot trust either replica - falling back to driver recomputation")
+                
+                // Mark that driver verification is now active (last resort)
+                driverVerificationActive((stageId, partitionId)) = true
+                activeTimeouts.remove((stageId, partitionId))
+                
+                // Start new timeout for driver recomputation
+                val driverTimeoutMs = sc.getConf.get("spark.driver.verification.timeout", "15000").toInt
+                val timeoutTimestamp = System.currentTimeMillis() + driverTimeoutMs
+                activeTimeouts((stageId, partitionId)) = timeoutTimestamp
+                
+                logInfo(s"[TIMEOUT] Starting driver recomputation with ${driverTimeoutMs}ms timeout")
+                messageScheduler.schedule(
+                  new Runnable {
+                    override def run(): Unit = {
+                      eventProcessLoop.post(VerificationTimeout(stageId, partitionId, 0, timeoutTimestamp))
+                    }
+                  },
+                  driverTimeoutMs,
+                  java.util.concurrent.TimeUnit.MILLISECONDS
+                )
+                
+                // Trigger driver recomputation
+                val task = replica1Event.task
+                val index1 = replica1Event.taskInfo.index
+                val index2 = replica2Event.taskInfo.index
+                
+                TaskResultVerificationManager.verifyOnDriver(
+                  stageId, index1, index2, partitionId, taskScheduler
+                )
+              }
+              
+            case None =>
+              logDebug(s"[TIMEOUT] No pending verification found (may have completed)")
+              activeTimeouts.remove((stageId, partitionId))
+              driverVerificationActive.remove((stageId, partitionId))
+          }
+          
+        case Some(_) =>
+          // Timeout was cancelled and restarted with different timestamp - ignore this one
+          logDebug(s"[TIMEOUT] Ignoring cancelled timeout for stage $stageId, partition $partitionId")
+          
+        case None =>
+          // Timeout was already removed (verification completed) - ignore
+          logDebug(s"[TIMEOUT] Timeout already completed for stage $stageId, partition $partitionId")
+      }
+    }
+  }
+
+  /**
+   * Cancel active timeout for a partition (used when NEITHER_MATCH requires driver fallback).
+   * Returns true if timeout was active and cancelled, false otherwise.
+   */
+  def cancelVerificationTimeout(stageId: Int, partitionId: Int): Boolean = {
+    this.synchronized {
+      val wasCancelled = activeTimeouts.remove((stageId, partitionId)).isDefined
+      if (wasCancelled) {
+        logDebug(s"[TIMEOUT] Cancelled timeout for stage $stageId, partition $partitionId")
+      }
+      wasCancelled
+    }
+  }
+
+  /**
+   * Mark that driver verification is active for a partition (used when EXEC_VERIFICATION=false).
+   * This indicates driver is the only/last verification method - if it times out, abort job.
+   */
+  def markDriverVerificationActive(stageId: Int, partitionId: Int): Unit = {
+    this.synchronized {
+      driverVerificationActive((stageId, partitionId)) = true
+      logDebug(s"[DRIVER] Marked driver verification as active for stage $stageId, partition $partitionId")
+    }
+  }
+
+  /**
+   * Restart verification timeout with longer duration for driver recomputation.
+   * Used when third-executor returns NEITHER_MATCH and falls back to driver.
+   * Marks driver verification as active (last resort - if this times out, abort job).
+   */
+  def restartTimeoutForDriverVerification(stageId: Int, partitionId: Int): Unit = {
+    this.synchronized {
+      // Cancel existing timeout
+      cancelVerificationTimeout(stageId, partitionId)
+      
+      // Mark that driver verification is now active (last resort)
+      driverVerificationActive((stageId, partitionId)) = true
+      
+      // Start new timeout for driver recomputation (longer duration)
+      val driverTimeoutMs = sc.getConf.get("spark.driver.verification.timeout", "15000").toInt
+      val timeoutTimestamp = System.currentTimeMillis() + driverTimeoutMs
+      activeTimeouts((stageId, partitionId)) = timeoutTimestamp
+      
+      logInfo(s"[TIMEOUT] Restarted timeout for driver verification: ${driverTimeoutMs}ms")
+      logInfo(s"[TIMEOUT] Driver is last resort - timeout will abort job")
+      // Schedule timeout using messageScheduler (non-blocking)
+      messageScheduler.schedule(
+        new Runnable {
+          override def run(): Unit = {
+            eventProcessLoop.post(VerificationTimeout(stageId, partitionId, 0, timeoutTimestamp))
+          }
+        },
+        driverTimeoutMs,
+        java.util.concurrent.TimeUnit.MILLISECONDS
+      )
     }
   }
 
@@ -2777,6 +3105,9 @@ private[spark] class DAGScheduler(
     taskScheduler.stop()
   }
 
+  // Initialize TaskResultVerificationManager with reference to this DAGScheduler
+  TaskResultVerificationManager.setDAGScheduler(this)
+  
   eventProcessLoop.start()
 }
 
@@ -2860,6 +3191,10 @@ private[scheduler] class DAGSchedulerEventProcessLoop(dagScheduler: DAGScheduler
 
     case ShuffleMergeFinalized(stage) =>
       dagScheduler.handleShuffleMergeFinalized(stage)
+
+    case VerificationTimeout(stageId, partitionId, _, scheduledTimestamp) =>
+      // Note: delay already handled by messageScheduler.schedule() - no Thread.sleep needed
+      dagScheduler.handleVerificationTimeout(stageId, partitionId, scheduledTimestamp)
   }
 
   override def onError(e: Throwable): Unit = {
