@@ -1,0 +1,159 @@
+
+services:
+  # ===== MASTER (Driver runs here) =====
+  master:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.quick
+    image: spark-byzantine:latest
+    container_name: spark-master
+    hostname: master
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+      - "4040:4040"
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=master
+      - SPARK_MASTER_PORT=7077
+      # DRIVER CONFIGURATION (controls verification strategy)
+      - EXEC_VERIFICATION=true
+      - MERKLE_VERIFICATION=true
+      - MERKLE_BUILD_TIMEOUT_MS=30000
+    volumes:
+      - ./shared:/shared
+      - ./apps:/apps
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    networks:
+      - spark-network
+
+  # ===== WORKER 1 (Honest executor) =====
+  worker1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.quick
+    image: spark-byzantine:latest
+    container_name: spark-worker1
+    hostname: worker1
+    depends_on:
+      - master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2g
+      # EXECUTOR BEHAVIOR (controls task execution honesty)
+      - HONEST=False
+    volumes:
+      - ./shared:/shared
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://master:7077
+    networks:
+      - spark-network
+
+  # ===== WORKER 2 (Can be honest or malicious) =====
+  worker2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.quick
+    image: spark-byzantine:latest
+    container_name: spark-worker2
+    hostname: worker2
+    depends_on:
+      - master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=2g
+      # EXECUTOR BEHAVIOR (change to false for Byzantine testing)
+      - HONEST=False
+      - BYZANTINE_PROBABILITY=1 
+    volumes:
+      - ./shared:/shared
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://master:7077
+    networks:
+      - spark-network
+
+  # ===== WORKER 3 (Regular worker, becomes verifier if driver chooses) =====
+  worker3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.quick
+    image: spark-byzantine:latest
+    container_name: spark-worker3
+    hostname: worker3
+    depends_on:
+      - master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://master:7077
+      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=1g
+      # EXECUTOR BEHAVIOR (should be honest since it may verify)
+      - HONEST=true
+    volumes:
+      - ./shared:/shared
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://master:7077
+    networks:
+      - spark-network
+
+  # ===== WORKER 4 (Honest executor) =====
+  worker4:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.quick
+    image: spark-byzantine:latest
+    container_name: spark-worker4
+    hostname: worker4
+    depends_on:
+      - master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://master:7077
+      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=1g
+      # EXECUTOR BEHAVIOR (honest for verification)
+      - HONEST=true
+    volumes:
+      - ./shared:/shared
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://master:7077
+    networks:
+      - spark-network
+
+  # ===== WORKER 5 (Honest executor) =====
+  worker5:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.quick
+    image: spark-byzantine:latest
+    container_name: spark-worker5
+    hostname: worker5
+    depends_on:
+      - master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://master:7077
+      - SPARK_WORKER_CORES=1
+      - SPARK_WORKER_MEMORY=1g
+      # EXECUTOR BEHAVIOR (honest for verification)
+      - HONEST=true
+    volumes:
+      - ./shared:/shared
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://master:7077
+    networks:
+      - spark-network
+
+networks:
+  spark-network:
+    driver: bridge

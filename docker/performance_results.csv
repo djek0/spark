@@ -1,0 +1,6 @@
+Test,Description,HONEST,EXEC_VERIFICATION,MERKLE_VERIFICATION,Duration_Seconds,Status
+1,"Baseline: All Honest (No Verification)",true,false,false,8.713849,SUCCESS
+2,"Driver Full-Task Verification",False,false,false,10.455938,SUCCESS
+3,"Driver Merkle-Based Verification",False,false,true,11.280934,SUCCESS
+4,"3rd Executor Full-Task Verification",False,true,false,N/A,FAILED
+5,"3rd Executor Merkle Verification",False,true,true,N/A,FAILED

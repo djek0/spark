@@ -1,0 +1,443 @@
+[EXTRA LOG] in SparkSubmit artifact, doSubmit function!
+WARNING: An illegal reflective access operation has occurred
+WARNING: Illegal reflective access by org.apache.spark.unsafe.Platform (file:/opt/spark/jars/spark-unsafe_2.12-3.3.0-SNAPSHOT.jar) to constructor java.nio.DirectByteBuffer(long,int)
+WARNING: Please consider reporting this to the maintainers of org.apache.spark.unsafe.Platform
+WARNING: Use --illegal-access=warn to enable warnings of further illegal reflective access operations
+WARNING: All illegal access operations will be denied in a future release
+Using Spark's default log4j profile: org/apache/spark/log4j-defaults.properties
+26/06/02 05:25:04 INFO SparkContext: Running Spark version 3.3.0-SNAPSHOT
+26/06/02 05:25:04 WARN NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes where applicable
+26/06/02 05:25:05 INFO ResourceUtils: ==============================================================
+26/06/02 05:25:05 INFO ResourceUtils: No custom resources configured for spark.driver.
+26/06/02 05:25:05 INFO ResourceUtils: ==============================================================
+26/06/02 05:25:05 INFO SparkContext: Submitted application: SimpleSparkTest
+26/06/02 05:25:05 INFO ResourceProfile: Default ResourceProfile created, executor resources: Map(cores -> name: cores, amount: 1, script: , vendor: , memory -> name: memory, amount: 1024, script: , vendor: , offHeap -> name: offHeap, amount: 0, script: , vendor: ), task resources: Map(cpus -> name: cpus, amount: 1.0)
+26/06/02 05:25:05 INFO ResourceProfile: Limiting resource is cpu
+26/06/02 05:25:05 INFO ResourceProfileManager: Added ResourceProfile id: 0
+26/06/02 05:25:05 INFO SecurityManager: Changing view acls to: spark
+26/06/02 05:25:05 INFO SecurityManager: Changing modify acls to: spark
+26/06/02 05:25:05 INFO SecurityManager: Changing view acls groups to: 
+26/06/02 05:25:05 INFO SecurityManager: Changing modify acls groups to: 
+26/06/02 05:25:05 INFO SecurityManager: SecurityManager: authentication disabled; ui acls disabled; users  with view permissions: Set(spark); groups with view permissions: Set(); users  with modify permissions: Set(spark); groups with modify permissions: Set()
+26/06/02 05:25:06 INFO Utils: Successfully started service 'sparkDriver' on port 43085.
+26/06/02 05:25:06 INFO SparkEnv: Registering MapOutputTracker
+26/06/02 05:25:06 INFO SparkEnv: Registering BlockManagerMaster
+26/06/02 05:25:06 INFO BlockManagerMasterEndpoint: Using org.apache.spark.storage.DefaultTopologyMapper for getting topology information
+26/06/02 05:25:06 INFO BlockManagerMasterEndpoint: BlockManagerMasterEndpoint up
+26/06/02 05:25:06 INFO SparkEnv: Registering BlockManagerMasterHeartbeat
+26/06/02 05:25:06 INFO DiskBlockManager: Created local directory at /tmp/blockmgr-4c23a161-8b5d-4a0b-b1ff-6c44874b0390
+26/06/02 05:25:06 INFO MemoryStore: MemoryStore started with capacity 434.4 MiB
+26/06/02 05:25:06 INFO SparkEnv: Registering OutputCommitCoordinator
+26/06/02 05:25:07 INFO Utils: Successfully started service 'SparkUI' on port 4040.
+26/06/02 05:25:07 INFO SparkUI: Bound SparkUI to 0.0.0.0, and started at http://master:4040
+26/06/02 05:25:07 INFO SparkContext: Added JAR file:/apps/spark-examples_2.12-3.3.0-SNAPSHOT.jar at spark://master:43085/jars/spark-examples_2.12-3.3.0-SNAPSHOT.jar with timestamp 1780377904577
+26/06/02 05:25:08 INFO TaskResultVerificationManager: [CONFIG] Executor verification enabled: false
+26/06/02 05:25:08 INFO TaskResultVerificationManager: [CONFIG] Merkle tree verification enabled: true
+26/06/02 05:25:08 INFO TaskResultVerificationManager: [CONFIG] Debug mode enabled: false
+26/06/02 05:25:08 INFO TaskResultVerificationManager: [CONFIG] Verification timeout: 5000ms
+26/06/02 05:25:08 INFO TaskResultVerificationManager: [CONFIG] Merkle tree build timeout: 30000ms
+26/06/02 05:25:08 INFO TaskResultVerificationManager: [CONFIG] Build Merkle trees on driver: false
+26/06/02 05:25:08 INFO StandaloneAppClient$ClientEndpoint: Connecting to master spark://master:7077...
+26/06/02 05:25:08 INFO TransportClientFactory: Successfully created connection to master/172.21.0.2:7077 after 110 ms (0 ms spent in bootstraps)
+26/06/02 05:25:09 INFO StandaloneSchedulerBackend: Connected to Spark cluster with app ID app-20260602052509-0000
+26/06/02 05:25:09 INFO Utils: Successfully started service 'org.apache.spark.network.netty.NettyBlockTransferService' on port 41991.
+26/06/02 05:25:09 INFO NettyBlockTransferService: Server created on master:41991
+26/06/02 05:25:09 INFO BlockManager: Using org.apache.spark.storage.RandomBlockReplicationPolicy for block replication policy
+26/06/02 05:25:09 INFO BlockManagerMaster: Registering BlockManager BlockManagerId(driver, master, 41991, None)
+26/06/02 05:25:09 INFO BlockManagerMasterEndpoint: Registering block manager master:41991 with 434.4 MiB RAM, BlockManagerId(driver, master, 41991, None)
+26/06/02 05:25:09 INFO BlockManagerMaster: Registered BlockManager BlockManagerId(driver, master, 41991, None)
+26/06/02 05:25:09 INFO BlockManager: Initialized BlockManager: BlockManagerId(driver, master, 41991, None)
+26/06/02 05:25:09 INFO StandaloneAppClient$ClientEndpoint: Executor added: app-20260602052509-0000/0 on worker-20260602052455-172.21.0.5-34497 (172.21.0.5:34497) with 2 core(s)
+26/06/02 05:25:09 INFO StandaloneSchedulerBackend: Granted executor ID app-20260602052509-0000/0 on hostPort 172.21.0.5:34497 with 2 core(s), 1024.0 MiB RAM
+26/06/02 05:25:09 INFO StandaloneAppClient$ClientEndpoint: Executor added: app-20260602052509-0000/1 on worker-20260602052456-172.21.0.4-45471 (172.21.0.4:45471) with 2 core(s)
+26/06/02 05:25:09 INFO StandaloneSchedulerBackend: Granted executor ID app-20260602052509-0000/1 on hostPort 172.21.0.4:45471 with 2 core(s), 1024.0 MiB RAM
+26/06/02 05:25:09 INFO StandaloneAppClient$ClientEndpoint: Executor added: app-20260602052509-0000/2 on worker-20260602052454-172.21.0.3-32939 (172.21.0.3:32939) with 2 core(s)
+26/06/02 05:25:09 INFO StandaloneSchedulerBackend: Granted executor ID app-20260602052509-0000/2 on hostPort 172.21.0.3:32939 with 2 core(s), 1024.0 MiB RAM
+26/06/02 05:25:09 INFO StandaloneAppClient$ClientEndpoint: Executor updated: app-20260602052509-0000/0 is now RUNNING
+26/06/02 05:25:09 INFO StandaloneAppClient$ClientEndpoint: Executor updated: app-20260602052509-0000/1 is now RUNNING
+26/06/02 05:25:09 INFO StandaloneAppClient$ClientEndpoint: Executor updated: app-20260602052509-0000/2 is now RUNNING
+26/06/02 05:25:10 INFO StandaloneSchedulerBackend: SchedulerBackend is ready for scheduling beginning after reached minRegisteredResourcesRatio: 0.0
+26/06/02 05:25:12 INFO SparkContext: Starting job: collect at SimpleSparkTest.scala:15
+26/06/02 05:25:12 INFO DAGScheduler: HandleJob Submitted: 0
+26/06/02 05:25:12 INFO DAGScheduler: Got job 0 (collect at SimpleSparkTest.scala:15) with 6 output partitions- john
+26/06/02 05:25:12 INFO DAGScheduler: Final stage: ResultStage 0 (collect at SimpleSparkTest.scala:15)
+26/06/02 05:25:12 INFO DAGScheduler: Parents of final stage: List()
+26/06/02 05:25:12 INFO DAGScheduler: Missing parents: List()
+26/06/02 05:25:12 INFO DAGScheduler: Submitting ResultStage 0 (MapPartitionsRDD[1] at map at SimpleSparkTest.scala:14), which has no missing parents
+26/06/02 05:25:13 INFO MemoryStore: Block broadcast_0 stored as values in memory (estimated size 3.9 KiB, free 434.4 MiB)
+26/06/02 05:25:13 INFO MemoryStore: Block broadcast_0_piece0 stored as bytes in memory (estimated size 2.2 KiB, free 434.4 MiB)
+26/06/02 05:25:13 INFO BlockManagerInfo: Added broadcast_0_piece0 in memory on master:41991 (size: 2.2 KiB, free: 434.4 MiB)
+26/06/02 05:25:13 INFO SparkContext: Created broadcast 0 from broadcast at DAGScheduler.scala:1519
+26/06/02 05:25:14 INFO DAGScheduler: Submitting 12 missing tasks from ResultStage 0 (MapPartitionsRDD[1] at map at SimpleSparkTest.scala:14) (first 15 tasks are for partitions Vector(0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5))
+26/06/02 05:25:14 INFO DAGScheduler: [+] Created 12 replica tasks for 6 partitions (2x replication)
+26/06/02 05:25:14 INFO TaskSchedulerImpl: Adding task set 0.0 with 12 tasks resource profile 0
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=11, partitionId=5 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=10, partitionId=5 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=9, partitionId=4 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=8, partitionId=4 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=7, partitionId=3 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=6, partitionId=3 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=5, partitionId=2 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=4, partitionId=2 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=3, partitionId=1 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=2, partitionId=1 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=1, partitionId=0 to pending lists
+26/06/02 05:25:14 INFO TaskSetManager: [PENDING TASKS] Adding task index=0, partitionId=0 to pending lists
+26/06/02 05:25:19 INFO CoarseGrainedSchedulerBackend$DriverEndpoint: Registered executor NettyRpcEndpointRef(spark-client://Executor) (172.21.0.4:57684) with ID 1,  ResourceProfileId 0
+26/06/02 05:25:19 INFO CoarseGrainedSchedulerBackend$DriverEndpoint: Registered executor NettyRpcEndpointRef(spark-client://Executor) (172.21.0.5:46026) with ID 0,  ResourceProfileId 0
+26/06/02 05:25:19 INFO CoarseGrainedSchedulerBackend$DriverEndpoint: Registered executor NettyRpcEndpointRef(spark-client://Executor) (172.21.0.3:49712) with ID 2,  ResourceProfileId 0
+26/06/02 05:25:20 INFO BlockManagerMasterEndpoint: Registering block manager 172.21.0.3:45973 with 434.4 MiB RAM, BlockManagerId(2, 172.21.0.3, 45973, None)
+26/06/02 05:25:20 INFO BlockManagerMasterEndpoint: Registering block manager 172.21.0.5:36143 with 434.4 MiB RAM, BlockManagerId(0, 172.21.0.5, 36143, None)
+26/06/02 05:25:20 INFO BlockManagerMasterEndpoint: Registering block manager 172.21.0.4:41291 with 434.4 MiB RAM, BlockManagerId(1, 172.21.0.4, 41291, None)
+26/06/02 05:25:21 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=0, taskId=0, partitionId=0
+26/06/02 05:25:21 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=0 with stageIndex=(0,0) (array index=0), executor=0, host=172.21.0.5
+26/06/02 05:25:21 INFO TaskSetManager: Starting task 0.0 in stage 0.0 (TID 0) (172.21.0.5, executor 0, partition 0, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:21 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=2, taskId=1, partitionId=1
+26/06/02 05:25:21 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=1 with stageIndex=(0,2) (array index=2), executor=0, host=172.21.0.5
+26/06/02 05:25:21 INFO TaskSetManager: Starting task 2.0 in stage 0.0 (TID 1) (172.21.0.5, executor 0, partition 1, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:21 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=1, taskId=2, partitionId=0
+26/06/02 05:25:21 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=2 with stageIndex=(0,1) (array index=1), executor=2, host=172.21.0.3
+26/06/02 05:25:21 INFO TaskSetManager: Starting task 1.0 in stage 0.0 (TID 2) (172.21.0.3, executor 2, partition 0, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:21 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=3, taskId=3, partitionId=1
+26/06/02 05:25:21 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=3 with stageIndex=(0,3) (array index=3), executor=2, host=172.21.0.3
+26/06/02 05:25:21 INFO TaskSetManager: Starting task 3.0 in stage 0.0 (TID 3) (172.21.0.3, executor 2, partition 1, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:21 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=4, taskId=4, partitionId=2
+26/06/02 05:25:21 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=4 with stageIndex=(0,4) (array index=4), executor=1, host=172.21.0.4
+26/06/02 05:25:21 INFO TaskSetManager: Starting task 4.0 in stage 0.0 (TID 4) (172.21.0.4, executor 1, partition 2, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:21 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=6, taskId=5, partitionId=3
+26/06/02 05:25:21 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=5 with stageIndex=(0,6) (array index=6), executor=1, host=172.21.0.4
+26/06/02 05:25:21 INFO TaskSetManager: Starting task 6.0 in stage 0.0 (TID 5) (172.21.0.4, executor 1, partition 3, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:22 INFO BlockManagerInfo: Added broadcast_0_piece0 in memory on 172.21.0.4:41291 (size: 2.2 KiB, free: 434.4 MiB)
+26/06/02 05:25:22 INFO BlockManagerInfo: Added broadcast_0_piece0 in memory on 172.21.0.3:45973 (size: 2.2 KiB, free: 434.4 MiB)
+26/06/02 05:25:22 INFO BlockManagerInfo: Added broadcast_0_piece0 in memory on 172.21.0.5:36143 (size: 2.2 KiB, free: 434.4 MiB)
+26/06/02 05:25:23 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=5, taskId=6, partitionId=2
+26/06/02 05:25:23 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=6 with stageIndex=(0,5) (array index=5), executor=0, host=172.21.0.5
+26/06/02 05:25:23 INFO TaskSetManager: Starting task 5.0 in stage 0.0 (TID 6) (172.21.0.5, executor 0, partition 2, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=7, taskId=7, partitionId=3
+26/06/02 05:25:23 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=7 with stageIndex=(0,7) (array index=7), executor=0, host=172.21.0.5
+26/06/02 05:25:23 INFO TaskSetManager: Starting task 7.0 in stage 0.0 (TID 7) (172.21.0.5, executor 0, partition 3, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:23 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=8, taskId=8, partitionId=4
+26/06/02 05:25:23 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=8 with stageIndex=(0,8) (array index=8), executor=1, host=172.21.0.4
+26/06/02 05:25:23 INFO TaskSetManager: Starting task 8.0 in stage 0.0 (TID 8) (172.21.0.4, executor 1, partition 4, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:23 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=10, taskId=9, partitionId=5
+26/06/02 05:25:23 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=9 with stageIndex=(0,10) (array index=10), executor=1, host=172.21.0.4
+26/06/02 05:25:23 INFO TaskSetManager: Starting task 10.0 in stage 0.0 (TID 9) (172.21.0.4, executor 1, partition 5, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:23 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=9, taskId=10, partitionId=4
+26/06/02 05:25:23 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=10 with stageIndex=(0,9) (array index=9), executor=2, host=172.21.0.3
+26/06/02 05:25:23 INFO TaskSetManager: Starting task 9.0 in stage 0.0 (TID 10) (172.21.0.3, executor 2, partition 4, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [TASK SCHEDULING] Dequeued task with index=11, taskId=11, partitionId=5
+26/06/02 05:25:23 INFO TaskSetManager: [VERIFICATION REGISTER] Registering taskId=11 with stageIndex=(0,11) (array index=11), executor=2, host=172.21.0.3
+26/06/02 05:25:23 INFO TaskSetManager: Starting task 11.0 in stage 0.0 (TID 11) (172.21.0.3, executor 2, partition 5, PROCESS_LOCAL, 4582 bytes) taskResourceAssignments Map()
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=5, index=6, successful(6)=false, killedByOtherAttempt.contains(5)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=6 completed. Replica partner index=7, running=true, successful=false, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=6 succeeded, but NOT killing replica partner index 7 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 6.0 in stage 0.0 (TID 5) in 2173 ms on 172.21.0.4 (executor 1) (1/12)
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=0, index=0, successful(0)=false, killedByOtherAttempt.contains(0)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=0 completed. Replica partner index=1, running=true, successful=false, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=0 succeeded, but NOT killing replica partner index 1 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 0.0 in stage 0.0 (TID 0) in 2347 ms on 172.21.0.5 (executor 0) (2/12)
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=1, index=2, successful(2)=false, killedByOtherAttempt.contains(1)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=2 completed. Replica partner index=3, running=true, successful=false, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=2 succeeded, but NOT killing replica partner index 3 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 2.0 in stage 0.0 (TID 1) in 2281 ms on 172.21.0.5 (executor 0) (3/12)
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=4, index=4, successful(4)=false, killedByOtherAttempt.contains(4)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=4 completed. Replica partner index=5, running=true, successful=false, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=4 succeeded, but NOT killing replica partner index 5 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 4.0 in stage 0.0 (TID 4) in 2243 ms on 172.21.0.4 (executor 1) (4/12)
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=2, index=1, successful(1)=false, killedByOtherAttempt.contains(2)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=1 completed. Replica partner index=0, running=false, successful=true, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=1 succeeded, but NOT killing replica partner index 0 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 1.0 in stage 0.0 (TID 2) in 2264 ms on 172.21.0.3 (executor 2) (5/12)
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=3, index=3, successful(3)=false, killedByOtherAttempt.contains(3)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=3 completed. Replica partner index=2, running=false, successful=true, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=3 succeeded, but NOT killing replica partner index 2 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 3.0 in stage 0.0 (TID 3) in 2261 ms on 172.21.0.3 (executor 2) (6/12)
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=8, index=8, successful(8)=false, killedByOtherAttempt.contains(8)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=8 completed. Replica partner index=9, running=true, successful=false, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=8 succeeded, but NOT killing replica partner index 9 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 8.0 in stage 0.0 (TID 8) in 171 ms on 172.21.0.4 (executor 1) (7/12)
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=7, index=7, successful(7)=false, killedByOtherAttempt.contains(7)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=7 completed. Replica partner index=6, running=false, successful=true, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=7 succeeded, but NOT killing replica partner index 6 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 7.0 in stage 0.0 (TID 7) in 205 ms on 172.21.0.5 (executor 0) (8/12)
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=6, index=5, successful(5)=false, killedByOtherAttempt.contains(6)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=5 completed. Replica partner index=4, running=false, successful=true, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=5 succeeded, but NOT killing replica partner index 4 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 5.0 in stage 0.0 (TID 6) in 244 ms on 172.21.0.5 (executor 0) (9/12)
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=10, index=9, successful(9)=false, killedByOtherAttempt.contains(10)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=9 completed. Replica partner index=8, running=false, successful=true, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=9 succeeded, but NOT killing replica partner index 8 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 9.0 in stage 0.0 (TID 10) in 104 ms on 172.21.0.3 (executor 2) (10/12)
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [+] CONSENSUS: Valid result for stage 0, partition 1 (indexes 2, 3)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [CONSENSUS FLAG] Set consensus flag for stage 0, partition 1
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=9, index=10, successful(10)=false, killedByOtherAttempt.contains(9)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=10 completed. Replica partner index=11, running=true, successful=false, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=10 succeeded, but NOT killing replica partner index 11 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 10.0 in stage 0.0 (TID 9) in 162 ms on 172.21.0.4 (executor 1) (11/12)
+26/06/02 05:25:23 INFO TaskResultGetter: Calling addNewResultTasks from task verification manager
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] handleSuccessfulTask called: tid=11, index=11, successful(11)=false, killedByOtherAttempt.contains(11)=false
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION DEBUG] Task index=11 completed. Replica partner index=10, running=false, successful=true, attempts=1
+26/06/02 05:25:23 INFO TaskSetManager: [REPLICATION] Task index=11 succeeded, but NOT killing replica partner index 10 - needed for Byzantine verification
+26/06/02 05:25:23 INFO TaskSetManager: Finished task 11.0 in stage 0.0 (TID 11) in 137 ms on 172.21.0.3 (executor 2) (12/12)
+26/06/02 05:25:23 INFO DAGScheduler: [+] Both replicas succeeded for partition 0
+26/06/02 05:25:23 INFO TaskSchedulerImpl: Removed TaskSet 0.0, whose tasks have all completed, from pool 
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION] Byzantine fault detected, storing events and waiting for verdict
+26/06/02 05:25:23 INFO DAGScheduler: Dispatching verifyResult() after batching complete
+26/06/02 05:25:23 ERROR TaskResultVerificationManager: [X] BYZANTINE FAULT DETECTED: Hash mismatch for stage 0, partition 0 (indexes 0, 1)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [VERIFICATION DISPATCH] Launching async verification after batching complete
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [VERIFICATION] Dispatching: EXEC_VERIFICATION=false, MERKLE_VERIFICATION=true
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER] Starting verification for partition 0 (merkle=true)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Building Merkle trees for stage 0, partition 0
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Building trees for idx0 and idx1
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Original executors: 0@172.21.0.5 (idx0), 2@172.21.0.3 (idx1)
+26/06/02 05:25:23 WARN TaskResultVerificationManager: [MERKLE] Finals files not found, cannot build Merkle trees
+26/06/02 05:25:23 WARN TaskResultVerificationManager: [DRIVER] Merkle comparison found no disagreement, falling back to full task
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Starting driver recomputation for stage 0, partition 0 (full task)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Using verification task ID: -1000000
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Running task on driver: partitionId=0
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Registered task ID -1000000 with BlockManager
+appName: SimpleSparkTest
+appName: SimpleSparkTest
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Full-result comparison:
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Driver hash: 1440537516
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Replica 1 (idx0) hash: -1329081993
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Replica 2 (idx1) hash: 1440537516
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [?] VERDICT: Replica 2 (idx1) is CORRECT, Replica 1 (idx0) is BYZANTINE
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION COMPLETE] Stage 0, partition 0: verdict=REPLICA_2_CORRECT
+26/06/02 05:25:23 INFO DAGScheduler: [?] Using Replica 2 (taskId=2, idx=1)
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION COMPLETE] Committing result for partition 0
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Released locks for verification task ID -1000000
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: [+] Both replicas succeeded for partition 1
+26/06/02 05:25:23 INFO DAGScheduler: [CONSENSUS] Hashes match for partition 1 - proceeding without async verification
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [+] CONSENSUS: Valid result for stage 0, partition 4 (indexes 8, 9)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [CONSENSUS FLAG] Set consensus flag for stage 0, partition 4
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: [+] Both replicas succeeded for partition 3
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION] Byzantine fault detected, storing events and waiting for verdict
+26/06/02 05:25:23 INFO DAGScheduler: Dispatching verifyResult() after batching complete
+26/06/02 05:25:23 ERROR TaskResultVerificationManager: [X] BYZANTINE FAULT DETECTED: Hash mismatch for stage 0, partition 3 (indexes 6, 7)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [VERIFICATION DISPATCH] Launching async verification after batching complete
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [VERIFICATION] Dispatching: EXEC_VERIFICATION=false, MERKLE_VERIFICATION=true
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER] Starting verification for partition 3 (merkle=true)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Building Merkle trees for stage 0, partition 3
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Building trees for idx6 and idx7
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Original executors: 1@172.21.0.4 (idx6), 0@172.21.0.5 (idx7)
+26/06/02 05:25:23 WARN TaskResultVerificationManager: [MERKLE] Finals files not found, cannot build Merkle trees
+26/06/02 05:25:23 WARN TaskResultVerificationManager: [DRIVER] Merkle comparison found no disagreement, falling back to full task
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Starting driver recomputation for stage 0, partition 3 (full task)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Using verification task ID: -1000003
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Running task on driver: partitionId=3
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Registered task ID -1000003 with BlockManager
+appName: SimpleSparkTest
+appName: SimpleSparkTest26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Full-result comparison:
+
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Driver hash: -23859476
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Replica 1 (idx6) hash: -23859476
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Replica 2 (idx7) hash: 504550495
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [?] VERDICT: Replica 1 (idx6) is CORRECT, Replica 2 (idx7) is BYZANTINE
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION COMPLETE] Stage 0, partition 3: verdict=REPLICA_1_CORRECT
+26/06/02 05:25:23 INFO DAGScheduler: [?] Using Replica 1 (taskId=5, idx=6)
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION COMPLETE] Committing result for partition 3
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Released locks for verification task ID -1000003
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: [+] Both replicas succeeded for partition 2
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION] Byzantine fault detected, storing events and waiting for verdict
+26/06/02 05:25:23 INFO DAGScheduler: Dispatching verifyResult() after batching complete
+26/06/02 05:25:23 ERROR TaskResultVerificationManager: [X] BYZANTINE FAULT DETECTED: Hash mismatch for stage 0, partition 2 (indexes 4, 5)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [VERIFICATION DISPATCH] Launching async verification after batching complete
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [VERIFICATION] Dispatching: EXEC_VERIFICATION=false, MERKLE_VERIFICATION=true
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER] Starting verification for partition 2 (merkle=true)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Building Merkle trees for stage 0, partition 2
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Building trees for idx4 and idx5
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Original executors: 1@172.21.0.4 (idx4), 0@172.21.0.5 (idx5)
+26/06/02 05:25:23 WARN TaskResultVerificationManager: [MERKLE] Finals files not found, cannot build Merkle trees
+26/06/02 05:25:23 WARN TaskResultVerificationManager: [DRIVER] Merkle comparison found no disagreement, falling back to full task
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Starting driver recomputation for stage 0, partition 2 (full task)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Using verification task ID: -1000002
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Running task on driver: partitionId=2
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Registered task ID -1000002 with BlockManager
+appName: SimpleSparkTest
+appName: SimpleSparkTest
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Full-result comparison:
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Driver hash: 1277997489
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Replica 1 (idx4) hash: 1277997489
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Replica 2 (idx5) hash: -616549916
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [?] VERDICT: Replica 1 (idx4) is CORRECT, Replica 2 (idx5) is BYZANTINE
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION COMPLETE] Stage 0, partition 2: verdict=REPLICA_1_CORRECT
+26/06/02 05:25:23 INFO DAGScheduler: [?] Using Replica 1 (taskId=4, idx=4)
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION COMPLETE] Committing result for partition 2
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Released locks for verification task ID -1000002
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: [+] Both replicas succeeded for partition 4
+26/06/02 05:25:23 INFO DAGScheduler: [CONSENSUS] Hashes match for partition 4 - proceeding without async verification
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: [+] Both replicas succeeded for partition 5
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION] Byzantine fault detected, storing events and waiting for verdict
+26/06/02 05:25:23 INFO DAGScheduler: Dispatching verifyResult() after batching complete
+26/06/02 05:25:23 ERROR TaskResultVerificationManager: [X] BYZANTINE FAULT DETECTED: Hash mismatch for stage 0, partition 5 (indexes 10, 11)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [VERIFICATION DISPATCH] Launching async verification after batching complete
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [VERIFICATION] Dispatching: EXEC_VERIFICATION=false, MERKLE_VERIFICATION=true
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER] Starting verification for partition 5 (merkle=true)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Building Merkle trees for stage 0, partition 5
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Building trees for idx10 and idx11
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [MERKLE] Original executors: 1@172.21.0.4 (idx10), 2@172.21.0.3 (idx11)
+26/06/02 05:25:23 WARN TaskResultVerificationManager: [MERKLE] Finals files not found, cannot build Merkle trees
+26/06/02 05:25:23 WARN TaskResultVerificationManager: [DRIVER] Merkle comparison found no disagreement, falling back to full task
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Starting driver recomputation for stage 0, partition 5 (full task)
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Using verification task ID: -1000005
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Running task on driver: partitionId=5
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Registered task ID -1000005 with BlockManager
+appName: SimpleSparkTest
+appName: SimpleSparkTest
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Full-result comparison:
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Driver hash: -1078388907
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Replica 1 (idx10) hash: 325093168
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE]   Replica 2 (idx11) hash: -1078388907
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [?] VERDICT: Replica 2 (idx11) is CORRECT, Replica 1 (idx10) is BYZANTINE
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION COMPLETE] Stage 0, partition 5: verdict=REPLICA_2_CORRECT
+26/06/02 05:25:23 INFO DAGScheduler: [?] Using Replica 2 (taskId=11, idx=11)
+26/06/02 05:25:23 INFO DAGScheduler: [VERIFICATION COMPLETE] Committing result for partition 5
+26/06/02 05:25:23 INFO DAGScheduler: Checking consensus from TaskResultVerification
+26/06/02 05:25:23 INFO DAGScheduler: [+] Job 0 finishing, all tasks complete and no pending verifications
+26/06/02 05:25:23 INFO DAGScheduler: ResultStage 0 (collect at SimpleSparkTest.scala:15) finished in 11.008 s
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [CLEANUP] Cleaned up all data structures for stage 0
+26/06/02 05:25:23 INFO DAGScheduler: Job 0 is finished. Cancelling potential speculative or zombie tasks for this job
+26/06/02 05:25:23 INFO TaskSchedulerImpl: Killing all running tasks in stage 0: Stage finished
+26/06/02 05:25:23 INFO DAGScheduler: Job 0 finished: collect at SimpleSparkTest.scala:15, took 11.280934 s
+26/06/02 05:25:23 INFO TaskResultVerificationManager: [DRIVER RECOMPUTE] Released locks for verification task ID -1000005
+2
+4
+6
+8
+10
+12
+14
+16
+18
+20
+22
+24
+26
+28
+30
+32
+34
+36
+38
+40
+42
+44
+46
+48
+50
+52
+54
+56
+58
+60
+193
+-65
+-67
+68
+70
+72
+74
+76
+78
+80
+82
+84
+86
+88
+90
+92
+94
+96
+98
+100
+102
+104
+106
+108
+110
+112
+114
+116
+118
+120
+122
+124
+126
+128
+130
+132
+134
+136
+138
+140
+142
+144
+146
+148
+150
+152
+154
+156
+158
+160
+162
+164
+166
+168
+170
+172
+174
+176
+178
+180
+182
+184
+186
+188
+190
+192
+194
+196
+198
+200
+26/06/02 05:25:23 INFO SparkUI: Stopped Spark web UI at http://master:4040
+26/06/02 05:25:23 INFO StandaloneSchedulerBackend: Shutting down all executors
+26/06/02 05:25:23 INFO CoarseGrainedSchedulerBackend$DriverEndpoint: Asking each executor to shut down
+26/06/02 05:25:23 INFO MapOutputTrackerMasterEndpoint: MapOutputTrackerMasterEndpoint stopped!
+26/06/02 05:25:24 INFO MemoryStore: MemoryStore cleared
+26/06/02 05:25:24 INFO BlockManager: BlockManager stopped
+26/06/02 05:25:24 INFO BlockManagerMaster: BlockManagerMaster stopped
+26/06/02 05:25:24 INFO OutputCommitCoordinator$OutputCommitCoordinatorEndpoint: OutputCommitCoordinator stopped!
+26/06/02 05:25:24 INFO SparkContext: Successfully stopped SparkContext
+26/06/02 05:25:24 INFO ShutdownHookManager: Shutdown hook called
+26/06/02 05:25:24 INFO ShutdownHookManager: Deleting directory /tmp/spark-31e111fe-194a-4768-ac2f-4c3204130a05
+26/06/02 05:25:24 INFO ShutdownHookManager: Deleting directory /tmp/spark-9e4d24de-7eec-4a7c-821c-a956b10e9fcb

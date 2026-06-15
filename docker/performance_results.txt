@@ -1,0 +1,59 @@
+Byzantine Fault Tolerance - Performance Test Results
+Generated: Tue Jun  2 08:23:35 AM EEST 2026
+====================================================
+
+Test 1: Baseline: All Honest (No Verification)
+  Configuration:
+    HONEST=true
+    EXEC_VERIFICATION=false
+    MERKLE_VERIFICATION=false
+  Results:
+    Total execution time: 14.612688649s
+    Spark job time: 8.713849s
+    Status: SUCCESS
+    Log file: test_1.log
+
+Test 2: Driver Full-Task Verification
+  Configuration:
+    HONEST=False
+    EXEC_VERIFICATION=false
+    MERKLE_VERIFICATION=false
+  Results:
+    Total execution time: 19.417436906s
+    Spark job time: 10.455938s
+    Status: SUCCESS
+    Log file: test_2.log
+
+Test 3: Driver Merkle-Based Verification
+  Configuration:
+    HONEST=False
+    EXEC_VERIFICATION=false
+    MERKLE_VERIFICATION=true
+  Results:
+    Total execution time: 22.030323509s
+    Spark job time: 11.280934s
+    Status: SUCCESS
+    Log file: test_3.log
+
+Test 4: 3rd Executor Full-Task Verification
+  Configuration:
+    HONEST=False
+    EXEC_VERIFICATION=true
+    MERKLE_VERIFICATION=false
+  Results:
+    Total execution time: 36.705470944s
+    Spark job time: N/As
+    Status: FAILED
+    Log file: test_4.log
+
+Test 5: 3rd Executor Merkle Verification
+  Configuration:
+    HONEST=False
+    EXEC_VERIFICATION=true
+    MERKLE_VERIFICATION=true
+  Results:
+    Total execution time: 27.342782069s
+    Spark job time: N/As
+    Status: FAILED
+    Log file: test_5.log
+

@@ -64,7 +64,9 @@ object MerkleTree extends Logging {
   
   def buildTree(data: Array[(Long, String)]): MerkleNode = {
     if (data.isEmpty) {
-      throw new IllegalArgumentException("Cannot build tree from empty data")
+      // Empty partition is valid - return a special empty node with predictable hash
+      logInfo("[MERKLE] Building tree from empty partition - using EmptyNode")
+      return LeafNode(0, -1L)  // Special: hash=0, uid=-1 indicates empty partition
     }
     
     val leaves: Array[MerkleNode] = data.map { case (uid, value) =>

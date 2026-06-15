@@ -44,6 +44,7 @@ object TaskResultVerificationManager extends Logging {
   private sealed trait MerkleBuildOutcome
   private case class BothTreesBuilt(tree1: org.apache.spark.rdd.MerkleTree, tree2: org.apache.spark.rdd.MerkleTree) extends MerkleBuildOutcome
   private case class EarlyVerdict(correctIndex: Int, byzantineIndex: Int, reason: String) extends MerkleBuildOutcome
+  private case class SizeMismatch(leafCount1: Int, leafCount2: Int, reason: String) extends MerkleBuildOutcome  // Empty vs non-empty partition
   private case class MerkleBuildFailure(reason: String) extends MerkleBuildOutcome  // Build failed (driver or executor)
 
   // Configuration: Enable third-executor verification
@@ -65,6 +66,35 @@ object TaskResultVerificationManager extends Logging {
   logInfo(s"[CONFIG] Verification timeout: ${verificationTimeoutMs}ms")
   logInfo(s"[CONFIG] Merkle tree build timeout: ${merkleTreeBuildTimeoutMs}ms")
   logInfo(s"[CONFIG] Build Merkle trees on driver: $buildMerkleTreesOnDriver")
+
+  /**
+   * Detects if a stage reads from shuffle data by checking stage hierarchy.
+   * Driver cannot execute tasks that read shuffle due to missing TaskMemoryManager infrastructure.
+   * 
+   * @param stageId Stage ID to check
+   * @return true if stage has parent stages (reads shuffle), false otherwise
+   */
+  private def stageReadsFromShuffle(stageId: Int): Boolean = {
+    val stageOpt = dagScheduler.stageIdToStage.get(stageId)
+    stageOpt match {
+      case Some(stage) =>
+        // Any stage (ResultStage or ShuffleMapStage) with parents reads shuffle
+        val readsFromShuffle = stage.parents.nonEmpty
+        val stageType = stage match {
+          case _: ResultStage => "ResultStage"
+          case _: ShuffleMapStage => "ShuffleMapStage"
+        }
+        if (readsFromShuffle) {
+          logInfo(s"[SHUFFLE DETECTION] Stage $stageId is $stageType with ${stage.parents.length} parent(s) - READS from shuffle")
+        } else {
+          logInfo(s"[SHUFFLE DETECTION] Stage $stageId is $stageType with no parents - does NOT read from shuffle")
+        }
+        readsFromShuffle
+      case None =>
+        logWarning(s"[SHUFFLE DETECTION] Stage $stageId not found in stageIdToStage map")
+        false
+    }
+  }
 
   /**
    * Register a task for verification and store it for potential driver recomputation.
@@ -353,12 +383,25 @@ object TaskResultVerificationManager extends Logging {
     
     logInfo(s"[VERIFICATION] Dispatching: EXEC_VERIFICATION=$useExecutorVerification, MERKLE_VERIFICATION=$useMerkleVerification")
     
-    if (useExecutorVerification) {
+    // Check if stage reads from shuffle (driver cannot execute such tasks)
+    val readsFromShuffle = stageReadsFromShuffle(stageId)
+
+    // Auto-switch to executor verification if driver verification was requested but stage reads shuffle
+    if (readsFromShuffle && !useExecutorVerification) {
+      logWarning(s"[DISPATCH] Stage $stageId reads from shuffle - driver verification NOT supported")
+      logWarning(s"[DISPATCH] Reason: Driver TaskContext has taskMemoryManager=null, causing NullPointerException during shuffle read")
+      logWarning(s"[DISPATCH] Auto-switching to THIRD EXECUTOR verification for safety")
+      logWarning(s"[DISPATCH] To avoid this, set EXEC_VERIFICATION=true for stages after shuffle")
+      verifyOnThirdExecutor(stageId, index1, index2, partitionId, taskScheduler)
+    } else if (useExecutorVerification) {
       verifyOnThirdExecutor(stageId, index1, index2, partitionId, taskScheduler)
     } else {
       // Driver verification from the start - mark as active (last resort, no fallback available)
+      logInfo(s"[DISPATCH] About to mark driver verification active for stage $stageId, partition $partitionId")
       dagScheduler.markDriverVerificationActive(stageId, partitionId)
+      logInfo(s"[DISPATCH] About to call verifyOnDriver for stage $stageId, partition $partitionId")
       verifyOnDriver(stageId, index1, index2, partitionId, taskScheduler)
+      logInfo(s"[DISPATCH] verifyOnDriver returned for stage $stageId, partition $partitionId")
     }
   }
 
@@ -406,12 +449,22 @@ object TaskResultVerificationManager extends Logging {
                 logInfo(s"[THIRD-EXECUTOR] Early verdict received - skipping verification")
                 logInfo(s"[THIRD-EXECUTOR] Replica idx$correctIdx is CORRECT")
                 logInfo(s"[THIRD-EXECUTOR] Replica idx$byzantineIdx is BYZANTINE (timeout)")
+                // Determine verdict based on which index is correct
+                val verdict = if (correctIdx == index1) "REPLICA_1_CORRECT" else "REPLICA_2_CORRECT"
+                dagScheduler.completeVerificationWithVerdict(stageId, index1, index2, partitionId, verdict, None)
                 // Verification complete - no need to submit to third executor
 
               case Some((uid, leafHash1, leafHash2)) if uid == -2L =>
                 // UID mismatch: potential swap attack detected
                 logWarning(s"[THIRD-EXECUTOR] UID mismatch detected at disagreement point - potential swap attack")
                 logWarning(s"[THIRD-EXECUTOR] Falling back to full task recomputation for security")
+                submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
+
+              case Some((uid, leafCount1, leafCount2)) if uid == -3L =>
+                // Size mismatch: one empty, one non-empty partition
+                logWarning(s"[THIRD-EXECUTOR] Size mismatch detected (empty vs non-empty partition)")
+                logWarning(s"[THIRD-EXECUTOR] Replica 1: $leafCount1 leaves, Replica 2: $leafCount2 leaves")
+                logWarning(s"[THIRD-EXECUTOR] Cannot use Merkle tree - submitting full task verification")
                 submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
 
               case Some((uid, leafHash1, leafHash2)) =>
@@ -618,12 +671,22 @@ object TaskResultVerificationManager extends Logging {
           logInfo(s"[DRIVER] Early verdict received - skipping verification")
           logInfo(s"[DRIVER] Replica idx$correctIdx is CORRECT")
           logInfo(s"[DRIVER] Replica idx$byzantineIdx is BYZANTINE (timeout)")
+          // Determine verdict based on which index is correct
+          val verdict = if (correctIdx == index1) "REPLICA_1_CORRECT" else "REPLICA_2_CORRECT"
+          dagScheduler.completeVerificationWithVerdict(stageId, index1, index2, partitionId, verdict, None)
           // Verification complete - no need to recompute
 
         case Some((uid, leafHash1, leafHash2)) if uid == -2L =>
           // UID mismatch: potential swap attack detected
           logWarning(s"[DRIVER] UID mismatch detected at disagreement point - potential swap attack")
           logWarning(s"[DRIVER] Falling back to full task recomputation for security")
+          executeOnDriver(stageId, index1, index2, partitionId, None, None)
+
+        case Some((uid, leafCount1, leafCount2)) if uid == -3L =>
+          // Size mismatch: one empty, one non-empty partition
+          logWarning(s"[DRIVER] Size mismatch detected (empty vs non-empty partition)")
+          logWarning(s"[DRIVER] Replica 1: $leafCount1 leaves, Replica 2: $leafCount2 leaves")
+          logWarning(s"[DRIVER] Cannot use Merkle tree - falling back to full task recomputation")
           executeOnDriver(stageId, index1, index2, partitionId, None, None)
 
         case Some((uid, leafHash1, leafHash2)) =>
@@ -800,9 +863,11 @@ object TaskResultVerificationManager extends Logging {
    * @return Some((uid, leafHash1, leafHash2)) of the disagreeing element with per-tree leaf hashes,
    *         Some((-1, correctIndex, byzantineIndex)) for early verdict (timeout case),
    *         Some((-2, leafHash1, leafHash2)) for UID mismatch (potential swap attack),
+   *         Some((-3, leafCount1, leafCount2)) for size mismatch (empty vs non-empty),
    *         or None if trees match. leafHash1 corresponds to index1's tree, leafHash2 to index2's tree.
    *         Special cases: uid=-1 indicates early verdict (leafHash1=correctIndex, leafHash2=byzantineIndex)
    *                        uid=-2 indicates UID mismatch at disagreement point (swap attack detection)
+   *                        uid=-3 indicates size mismatch (leafHash1=leafCount1, leafHash2=leafCount2)
    */
   private def buildMerkleTreesAndFindDisagreement(
       stageId: Int,
@@ -863,6 +928,11 @@ object TaskResultVerificationManager extends Logging {
           }
           
           disagreement
+          
+        case SizeMismatch(leafCount1, leafCount2, reason) =>
+          // Size mismatch: one empty, one non-empty - return -3
+          logWarning(s"[MERKLE] Size mismatch: $reason")
+          Some((-3L, leafCount1, leafCount2))
           
         case MerkleBuildFailure(reason) =>
           // Build failed (driver or executor)
@@ -982,46 +1052,72 @@ object TaskResultVerificationManager extends Logging {
         // Smart fallback: use partial results if available
         (result1Opt, result2Opt) match {
           case (Some(result1), Some(result2)) =>
-            // Both executors responded - proceed with normal comparison
+            // Both executors responded
             logInfo(s"[MERKLE] ✓ Successfully received both tree build results from executors")
             logInfo(s"[MERKLE] Tree 1: ${result1.leafCount} leaves, rootHash=${result1.rootHash}, buildTime=${result1.buildTimeMs}ms")
             logInfo(s"[MERKLE] Tree 2: ${result2.leafCount} leaves, rootHash=${result2.rootHash}, buildTime=${result2.buildTimeMs}ms")
-            BothTreesBuilt(result1.tree, result2.tree)
+            
+            // Check if either tree represents an empty partition
+            val isEmpty1 = (result1.leafCount == 1 && result1.rootHash == 0)
+            val isEmpty2 = (result2.leafCount == 1 && result2.rootHash == 0)
+            
+            if (isEmpty1 && isEmpty2) {
+              logInfo(s"[MERKLE] Both replicas produced EMPTY results (valid empty partition)")
+              logInfo(s"[MERKLE] Trees will be compared - if they match, consensus achieved")
+              // Let trees be compared normally - they'll match and return None
+              BothTreesBuilt(result1.tree, result2.tree)
+              
+            } else if (isEmpty1 || isEmpty2) {
+              // One empty, one non-empty - size mismatch
+              logWarning(s"[MERKLE] Size mismatch: idx$index1=${result1.leafCount} leaves, idx$index2=${result2.leafCount} leaves")
+              logWarning(s"[MERKLE] One empty, one non-empty - full task recomputation needed")
+              // Return size mismatch outcome
+              SizeMismatch(result1.leafCount, result2.leafCount, "Empty vs non-empty partition")
+              
+            } else {
+              // Normal case: both non-empty
+              BothTreesBuilt(result1.tree, result2.tree)
+            }
             
           case (Some(result1), None) =>
-            // Only executor 1 responded - declare it CORRECT (timeout = Byzantine behavior)
-            logWarning(s"[MERKLE] ⚠ Replica 2 (idx$index2) timed out on tree building")
+            // Replica 2 timed out/failed
+            // Empty or not, if one succeeded and other failed → success wins
+            logWarning(s"[MERKLE] ⚠ Replica 2 (idx$index2) timed out/failed on tree building")
             logInfo(s"[✓] EARLY VERDICT: Replica 1 (idx$index1) is CORRECT (responded in ${result1.buildTimeMs}ms)")
-            logInfo(s"[✓] EARLY VERDICT: Replica 2 (idx$index2) is BYZANTINE (timeout = non-responsive)")
+            logInfo(s"[✓] EARLY VERDICT: Replica 2 (idx$index2) is BYZANTINE (timeout/failure = non-responsive)")
             logInfo(s"[MERKLE] Skipping tree comparison - timeout indicates Byzantine behavior")
             EarlyVerdict(index1, index2, s"Replica $index2 timed out after ${merkleTreeBuildTimeoutMs}ms")
             
           case (None, Some(result2)) =>
-            // Only executor 2 responded - declare it CORRECT (timeout = Byzantine behavior)
-            logWarning(s"[MERKLE] ⚠ Replica 1 (idx$index1) timed out on tree building")
+            // Replica 1 timed out/failed
+            // Empty or not, if one succeeded and other failed → success wins
+            logWarning(s"[MERKLE] ⚠ Replica 1 (idx$index1) timed out/failed on tree building")
             logInfo(s"[✓] EARLY VERDICT: Replica 2 (idx$index2) is CORRECT (responded in ${result2.buildTimeMs}ms)")
-            logInfo(s"[✓] EARLY VERDICT: Replica 1 (idx$index1) is BYZANTINE (timeout = non-responsive)")
+            logInfo(s"[✓] EARLY VERDICT: Replica 1 (idx$index1) is BYZANTINE (timeout/failure = non-responsive)")
             logInfo(s"[MERKLE] Skipping tree comparison - timeout indicates Byzantine behavior")
             EarlyVerdict(index2, index1, s"Replica $index1 timed out after ${merkleTreeBuildTimeoutMs}ms")
             
           case (None, None) =>
-            // Both executors timed out - cannot build trees, fall back to driver
-            logWarning(s"[MERKLE] ✗ Both replicas timed out on tree building (${merkleTreeBuildTimeoutMs}ms)")
-            logWarning(s"[MERKLE] Cannot determine correct replica - falling back to driver recomputation")
-            logWarning(s"[MERKLE] Throwing exception to trigger driver fallback")
-            throw new RuntimeException("Both executors timed out building Merkle trees - driver fallback required")
+            // Both executors timed out/failed - fall back to driver building
+            logWarning(s"[MERKLE] ✗ Both replicas timed out/failed on tree building (${merkleTreeBuildTimeoutMs}ms)")
+            logWarning(s"[MERKLE] Executors likely busy - falling back to building trees on driver")
+            logInfo(s"[MERKLE] Switching to driver-based tree building...")
+            // Fall back to driver building instead of throwing
+            return buildMerkleTreesOnDriver(stageId, index1, index2, partitionId, finalsPath1, finalsPath2, isBinary)
         }
       } catch {
         case e: Exception =>
           logError(s"[MERKLE] Task submission failed: ${e.getMessage}", e)
-          logWarning(s"[MERKLE] Throwing exception to trigger full task recomputation")
-          throw new RuntimeException(s"Merkle tree task submission failed: ${e.getMessage}", e)
+          logWarning(s"[MERKLE] Falling back to driver-based tree building")
+          // Fall back to driver building instead of throwing
+          return buildMerkleTreesOnDriver(stageId, index1, index2, partitionId, finalsPath1, finalsPath2, isBinary)
       }
     } catch {
       case e: Exception =>
         logError(s"[MERKLE] Unexpected error: ${e.getMessage}", e)
-        logWarning(s"[MERKLE] Throwing exception to trigger full task recomputation")
-        throw new RuntimeException(s"Merkle tree building failed unexpectedly: ${e.getMessage}", e)
+        logWarning(s"[MERKLE] Falling back to driver-based tree building as last resort")
+        // Fall back to driver building as last resort
+        buildMerkleTreesOnDriver(stageId, index1, index2, partitionId, finalsPath1, finalsPath2, isBinary)
     }
   }
 

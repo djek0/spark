@@ -1,0 +1,14 @@
+# Start from YOUR base Spark image
+FROM spark-byzantine-base:3.3.0
+
+USER root
+
+# Remove old spark-core JAR
+RUN rm -f /opt/spark/jars/spark-core_2.12-*.jar
+
+# Copy ONLY your updated spark-core JAR
+COPY core/target/spark-core_2.12-3.3.0-SNAPSHOT.jar /opt/spark/jars/
+
+USER spark
+
+WORKDIR /opt/spark

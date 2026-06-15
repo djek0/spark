@@ -772,9 +772,39 @@ private[spark] class Executor(
         val accumUpdates = task.collectAccumulatorUpdates()
         var metricPeaks = metricsPoller.getTaskMetricPeaks(taskId)  //array[Long]
         
-        // Hash the ENTIRE byte array to detect any modifications using shared utility
-        // This ensures consistency with driver recomputation
-        val hashValueCandidate = TaskResultVerificationManager.computeTaskResultHash(valueBytes).toLong
+        // Hash strategy depends on task type:
+        // - ResultTask: Hash the actual result data (deterministic)
+        // - ShuffleMapTask: Hash block sizes only (MapStatus metadata varies per executor)
+        val hashValueCandidate = if (task.isInstanceOf[ShuffleMapTask]) {
+          // For ShuffleMapTask: Hash block sizes (deterministic across replicas)
+          // MapStatus includes BlockManagerId which is non-deterministic
+          val mapStatus = value.asInstanceOf[MapStatus]
+          
+          // Collect all block sizes
+          // Strategy: Iterate until we hit an out-of-bounds (exception happens once)
+          // For typical jobs (< 10k partitions), this is faster than alternatives
+          val blockSizes = {
+            val builder = scala.collection.mutable.ArrayBuffer[Long]()
+            var idx = 0
+            try {
+              while (true) {
+                builder += mapStatus.getSizeForBlock(idx)
+                idx += 1
+              }
+            } catch {
+              case _: ArrayIndexOutOfBoundsException => // Expected - marks end of array
+            }
+            builder.toSeq
+          }
+          val sizeString = blockSizes.mkString(",")
+          logInfo(s"[SHUFFLE HASH] Task $taskId hashing ${blockSizes.length} block sizes: ${sizeString.take(200)}...")
+          TaskResultVerificationManager.computeTaskResultHash(
+            ByteBuffer.wrap(sizeString.getBytes("UTF-8"))
+          ).toLong
+        } else {
+          // For ResultTask: Hash the full serialized result (current behavior)
+          TaskResultVerificationManager.computeTaskResultHash(valueBytes).toLong
+        }
         metricPeaks = metricPeaks :+ hashValueCandidate
         // TODO: do not serialize value twice
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)
