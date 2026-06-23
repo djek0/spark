@@ -64,11 +64,11 @@ object VerificationTest {
       println(s"Number of elements: ${filtered.length}")
       
       if (filtered.length == 1) {
-        println("✓ SUCCESS: Single-element filtering works!")
+        println("[SUCCESS] Single-element filtering works!")
         println(s"  Expected element at UID=3 is value 4 (input) → 8 (output)")
         println(s"  Got: ${filtered(0)}")
       } else {
-        println(s"✗ FAILED: Expected 1 element, got ${filtered.length}")
+        println(s"[FAILED] Expected 1 element, got ${filtered.length}")
       }
     } finally {
       TaskContext.unset()

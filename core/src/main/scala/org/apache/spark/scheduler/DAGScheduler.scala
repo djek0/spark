@@ -1790,16 +1790,6 @@ private[spark] class DAGScheduler(
 //        resultsMap(task.stageId) = HashMap(taskIndex / 2 -> List(event.result.toString));
 //      }
 //    }
-      task match {
-        case _: ResultTask[_, _] | _: ShuffleMapTask =>
-          this.synchronized {
-            logInfo("Checking consensus from TaskResultVerification")
-            TaskResultVerificationManager.checkConsensus(event.taskInfo.taskId.toInt)
-          }
-        case _ =>
-          logDebug(s"[VERIFICATION REGISTER] Skipping consensus check for verification task ${task.getClass.getSimpleName} (taskId=${event.taskInfo.taskId})")
-      }
-
 
     // Make sure the task's accumulators are updated before any other processing happens, so that
     // we can post a task end event before any jobs or stages are updated. The accumulators are
@@ -1828,6 +1818,15 @@ private[spark] class DAGScheduler(
 
     this.synchronized {
       if (!bypassBatching) {
+        // Check consensus for Byzantine verification (only for fresh task completions, not verdict commits)
+        task match {
+          case _: ResultTask[_, _] | _: ShuffleMapTask =>
+            logInfo("Checking consensus from TaskResultVerification")
+            TaskResultVerificationManager.checkConsensus(event.taskInfo.taskId.toInt)
+          case _ =>
+            logDebug(s"[VERIFICATION REGISTER] Skipping consensus check for verification task ${task.getClass.getSimpleName} (taskId=${event.taskInfo.taskId})")
+        }
+
         // With different-index approach: replicas have indices 0,1 for partition 0; 2,3 for partition 1
         // So we use taskIndex/2 to map to partition ID for batching
         val partitionId = taskIndex / 2
@@ -1837,50 +1836,74 @@ private[spark] class DAGScheduler(
             logDebug(s"[+] Both replicas complete for partition $partitionId, processing both events")
             // Process both events through the normal completion flow
             val firstEvent = unpostedTaskEndEvent(stageId)(partitionId)
-            
+
             // Post both events to listener bus
             postTaskEnd(firstEvent)
             postTaskEnd(event)
-            
+
             // Update completion counter
             addCompletedTaskPerStage(stageId, 2)
             // Clean up the stored event
             unpostedTaskEndEvent(stageId).remove(partitionId)
-            
+
             // Determine which event to process for job completion
             // BOTH replicas should succeed for Byzantine verification
             // But we accept one success as fallback (Byzantine resilience)
             val firstSuccess = firstEvent.reason match { case Success => true; case _ => false }
             val currentSuccess = event.reason match { case Success => true; case _ => false }
-            
+
             val eventToProcess = (firstSuccess, currentSuccess) match {
               case (true, true) =>
                 // Both replicas succeeded - check if consensus already found
                 logInfo(s"[+] Both replicas succeeded for partition $partitionId")
-                
+
                 // Check if verification already found consensus (hashes match)
                 if (TaskResultVerificationManager.hasConsensus(stageId, partitionId)) {
                   // Consensus found - hashes match! Proceed immediately without waiting
                   logInfo(s"[CONSENSUS] Hashes match for partition $partitionId - proceeding without async verification")
-                  
+
                   // Clean up the consensus flag
                   TaskResultVerificationManager.cleanupConsensusFlag(stageId, partitionId)
-                  
+
                   // Use first replica (arbitrary choice since both are correct)
                   firstEvent
                 } else {
                   // No consensus - hashes differ (Byzantine fault detected)
                   logInfo(s"[VERIFICATION] Byzantine fault detected, storing events and waiting for verdict")
-                  
+
                   // Store both events for verdict-based selection
                   pendingVerificationResults((stageId, partitionId)) = (firstEvent, event)
-                  
+
                   // Start timeout timer for verification (includes Merkle tree building in parallel)
-                  // Merkle build (10s parallel) + third executor (5s) + margin (5s) = 20s
-                  val timeoutMs = sc.getConf.get("spark.verification.timeout", "20000").toInt
+                  // Adaptive timeout based on result size: larger data = more time needed
+                  val baseTimeoutMs = sc.getConf.get("spark.verification.timeout", "20000").toInt
+                  val timeoutMs = try {
+                    // Get size from DirectTaskResult
+                    val resultSizeBytes = firstEvent.result match {
+                      case directResult: DirectTaskResult[_] =>
+                        directResult.valueBytes.remaining().toLong
+                      case _ => 0L
+                    }
+                    val sizeMB = resultSizeBytes.toDouble / (1024 * 1024)
+                    
+                    // Aggressive scaling: 1.0 + (sizeMB / 100), cap at 3.0x
+                    // Full task recomputation scales with data size
+                    // 100MB = 2.0x (40s), 200MB = 3.0x (60s max)
+                    val sizeMultiplier = math.max(1.0, math.min(3.0, 1.0 + (sizeMB / 100.0)))
+                    val adaptiveTimeout = (baseTimeoutMs * sizeMultiplier).toInt
+                    
+                    logInfo(s"[ADAPTIVE TIMEOUT] Result size: ${sizeMB}MB, " +
+                            s"multiplier: ${sizeMultiplier}x, verification timeout: ${adaptiveTimeout}ms")
+                    
+                    adaptiveTimeout
+                  } catch {
+                    case _: Exception =>
+                      logDebug(s"[ADAPTIVE TIMEOUT] Result size not available, using base timeout: ${baseTimeoutMs}ms")
+                      baseTimeoutMs
+                  }
                   val timeoutTimestamp = System.currentTimeMillis() + timeoutMs
                   activeTimeouts((stageId, partitionId)) = timeoutTimestamp
-                  
+
                   // Schedule timeout using messageScheduler (non-blocking)
                   messageScheduler.schedule(
                     new Runnable {
@@ -1891,34 +1914,34 @@ private[spark] class DAGScheduler(
                     timeoutMs,
                     java.util.concurrent.TimeUnit.MILLISECONDS
                   )
-                  
+
                   // NOW dispatch verification AFTER pending verification is stored
                   // This prevents race condition where driver verification completes before pending entry exists
                   logInfo("Dispatching verifyResult() after batching complete")
                   TaskResultVerificationManager.verifyResult(firstEvent.taskInfo.taskId.toInt, taskScheduler)
-                  
+
                   // Return early - will resume when verdict arrives via completeVerificationWithVerdict()
                   return
                 }
-                
+
               case (true, false) =>
                 // Only first succeeded - use it directly (no verification needed)
                 logWarning(s"[!] Replica task ${event.taskInfo.taskId} failed: ${event.reason.getClass.getSimpleName}")
                 logInfo(s"[+] Using successful replica task ${firstEvent.taskInfo.taskId} (Byzantine resilience)")
                 firstEvent
-                
+
               case (false, true) =>
                 // Only current succeeded - use it directly
                 logWarning(s"[!] Replica task ${firstEvent.taskInfo.taskId} failed")
                 logInfo(s"[+] Using successful replica task ${event.taskInfo.taskId} (Byzantine resilience)")
                 event
-                
+
               case (false, false) =>
                 // Both failed
                 logError(s"[X] Both replicas failed for partition $partitionId, cannot complete partition")
                 return
             }
-            
+
             // Continue processing with the successful event (only reaches here when only one replica succeeded)
             if (eventToProcess != event) {
               // Need to reprocess with the first event instead
@@ -2331,19 +2354,19 @@ private[spark] class DAGScheduler(
         handleResubmittedFailure(task, stage)
 
       case _: TaskCommitDenied =>
-        println(s"[DEBUG] ❌ Event reason is TaskCommitDenied for taskId=${event.taskInfo.taskId}")
+        println(s"[DEBUG] Event reason is TaskCommitDenied for taskId=${event.taskInfo.taskId}")
         // Do nothing here, left up to the TaskScheduler to decide how to handle denied commits
 
       case _: ExceptionFailure | _: TaskKilled =>
-        println(s"[DEBUG] ❌ Event reason is ExceptionFailure/TaskKilled for taskId=${event.taskInfo.taskId}")
+        println(s"[DEBUG] Event reason is ExceptionFailure/TaskKilled for taskId=${event.taskInfo.taskId}")
         // Nothing left to do, already handled above for accumulator updates.
 
       case TaskResultLost =>
-        println(s"[DEBUG] ❌ Event reason is TaskResultLost for taskId=${event.taskInfo.taskId}")
+        println(s"[DEBUG] Event reason is TaskResultLost for taskId=${event.taskInfo.taskId}")
         // Do nothing here; the TaskScheduler handles these failures and resubmits the task.
 
       case _: ExecutorLostFailure | UnknownReason =>
-        println(s"[DEBUG] ❌ Event reason is ExecutorLostFailure/UnknownReason for taskId=${event.taskInfo.taskId}")
+        println(s"[DEBUG] Event reason is ExecutorLostFailure/UnknownReason for taskId=${event.taskInfo.taskId}")
         // Unrecognized failure - also do nothing. If the task fails repeatedly, the TaskScheduler
         // will abort the job.
     }
@@ -2377,15 +2400,15 @@ private[spark] class DAGScheduler(
           // Select correct event based on verdict
           val correctEvent = verdict match {
             case "REPLICA_1_CORRECT" =>
-              logInfo(s"[✓] Using Replica 1 (taskId=${replica1Event.taskInfo.taskId}, idx=$index1)")
+              logInfo(s"[VERDICT] Using Replica 1 (taskId=${replica1Event.taskInfo.taskId}, idx=$index1)")
               replica1Event
               
             case "REPLICA_2_CORRECT" =>
-              logInfo(s"[✓] Using Replica 2 (taskId=${replica2Event.taskInfo.taskId}, idx=$index2)")
+              logInfo(s"[VERDICT] Using Replica 2 (taskId=${replica2Event.taskInfo.taskId}, idx=$index2)")
               replica2Event
               
             case "BOTH_MATCH" =>
-              logInfo(s"[✓] Both replicas match, using Replica 1 (taskId=${replica1Event.taskInfo.taskId})")
+              logInfo(s"[VERDICT] Both replicas match, using Replica 1 (taskId=${replica1Event.taskInfo.taskId})")
               replica1Event
               
             case "NEITHER_MATCH" =>
@@ -2416,7 +2439,8 @@ private[spark] class DAGScheduler(
           // Use bypassBatching=true because we already have both events and selected the correct one
           logInfo(s"[VERIFICATION COMPLETE] Committing result for partition $partitionId")
           handleTaskCompletion(correctEvent, bypassBatching = true)
-          
+          logInfo(s"[VERIFICATION] handleTaskCompletion returned successfully for partition $partitionId")
+
           // Check if stage can now be finished (all verifications complete)
           if (canMarkStageAsFinished(stageId) && !hasPendingVerifications(stageId)) {
             stageIdToStage.get(stageId).foreach { stage =>
@@ -2507,9 +2531,13 @@ private[spark] class DAGScheduler(
                 activeTimeouts.remove((stageId, partitionId))
                 
                 // Start new timeout for driver recomputation
-                val driverTimeoutMs = sc.getConf.get("spark.driver.verification.timeout", "15000").toInt
+                // Driver timeout is 1.5x verification timeout (last resort needs more time)
+                val verificationTimeoutMs = sc.getConf.get("spark.verification.timeout", "20000").toInt
+                val driverTimeoutMs = (verificationTimeoutMs * 1.5).toInt
                 val timeoutTimestamp = System.currentTimeMillis() + driverTimeoutMs
                 activeTimeouts((stageId, partitionId)) = timeoutTimestamp
+                
+                logInfo(s"[TIMEOUT] Driver timeout: ${driverTimeoutMs}ms (1.5x verification timeout)")
                 
                 logInfo(s"[TIMEOUT] Starting driver recomputation with ${driverTimeoutMs}ms timeout")
                 messageScheduler.schedule(
@@ -2588,11 +2616,13 @@ private[spark] class DAGScheduler(
       driverVerificationActive((stageId, partitionId)) = true
       
       // Start new timeout for driver recomputation (longer duration)
-      val driverTimeoutMs = sc.getConf.get("spark.driver.verification.timeout", "15000").toInt
+      // Driver timeout is 1.5x verification timeout (last resort needs more time)
+      val verificationTimeoutMs = sc.getConf.get("spark.verification.timeout", "20000").toInt
+      val driverTimeoutMs = (verificationTimeoutMs * 1.5).toInt
       val timeoutTimestamp = System.currentTimeMillis() + driverTimeoutMs
       activeTimeouts((stageId, partitionId)) = timeoutTimestamp
       
-      logInfo(s"[TIMEOUT] Restarted timeout for driver verification: ${driverTimeoutMs}ms")
+      logInfo(s"[TIMEOUT] Restarted timeout for driver verification: ${driverTimeoutMs}ms (1.5x verification)")
       logInfo(s"[TIMEOUT] Driver is last resort - timeout will abort job")
       // Schedule timeout using messageScheduler (non-blocking)
       messageScheduler.schedule(
@@ -3195,6 +3225,15 @@ private[scheduler] class DAGSchedulerEventProcessLoop(dagScheduler: DAGScheduler
     case VerificationTimeout(stageId, partitionId, _, scheduledTimestamp) =>
       // Note: delay already handled by messageScheduler.schedule() - no Thread.sleep needed
       dagScheduler.handleVerificationTimeout(stageId, partitionId, scheduledTimestamp)
+
+    case verdict: VerificationVerdictEvent =>
+      dagScheduler.completeVerificationWithVerdict(
+        verdict.stageId,
+        verdict.index1,
+        verdict.index2,
+        verdict.partitionId,
+        verdict.verdict,
+        verdict.verifierResult)
   }
 
   override def onError(e: Throwable): Unit = {

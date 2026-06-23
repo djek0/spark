@@ -51,9 +51,9 @@ object ByzantineTest {
     println(s"Expected sum: $expected")
     
     if (sum == expected) {
-      println("✓ Result is CORRECT - Byzantine detection passed or no faults injected")
+      println("[CORRECT] Result is CORRECT - Byzantine detection passed or no faults injected")
     } else {
-      println("✗ Result is WRONG - Byzantine fault may have corrupted result")
+      println("[WRONG] Result is WRONG - Byzantine fault may have corrupted result")
     }
 
     spark.stop()

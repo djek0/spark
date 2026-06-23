@@ -15,7 +15,7 @@ case "$MODE" in
   production|prod|info)
     echo "Setting PRODUCTION logging mode (INFO level)..."
     cp "$CONF_DIR/log4j-replication-production.properties.template" "$CONF_DIR/log4j.properties"
-    echo "✓ Production mode activated"
+    echo "[OK] Production mode activated"
     echo "  - Shows: Job completion, consensus results, Byzantine faults"
     echo "  - Hides: Task details, hash storage, batching wait states"
     ;;
@@ -23,7 +23,7 @@ case "$MODE" in
   debug|dev|verbose)
     echo "Setting DEBUG logging mode (DEBUG level)..."
     cp "$CONF_DIR/log4j-replication-debug.properties.template" "$CONF_DIR/log4j.properties"
-    echo "✓ Debug mode activated"
+    echo "[OK] Debug mode activated"
     echo "  - Shows: All flow details, task registration, hash storage, batching states"
     echo "  - Use this for: Development, troubleshooting, understanding the flow"
     ;;

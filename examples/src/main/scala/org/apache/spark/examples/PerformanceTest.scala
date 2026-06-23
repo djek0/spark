@@ -33,7 +33,7 @@ object PerformanceTest {
       val endTime = System.currentTimeMillis()
       val totalTime = (endTime - startTime) / 1000.0
       
-      println(s"✓ Test completed successfully")
+      println(s"[SUCCESS] Test completed successfully")
       println(s"  Total elements: ${collected.length}")
       println(s"  Total time: ${totalTime}s")
       

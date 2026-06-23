@@ -118,3 +118,12 @@ private[scheduler] case class VerificationTimeout(
     delayMs: Int,  // Unused - kept for compatibility, delay handled by messageScheduler
     scheduledTimestamp: Long)
   extends DAGSchedulerEvent
+
+private[scheduler] case class VerificationVerdictEvent(
+    stageId: Int,
+    index1: Int,
+    index2: Int,
+    partitionId: Int,
+    verdict: String,
+    verifierResult: Option[Any])
+  extends DAGSchedulerEvent

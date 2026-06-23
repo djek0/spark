@@ -38,12 +38,12 @@ run_test() {
     duration=$(echo "$end_time - $start_time" | bc)
     
     if [ $exit_code -eq 0 ]; then
-        echo "✅ PASSED - Duration: ${duration}s" | tee -a "$RESULTS_FILE"
+        echo "[PASS] PASSED - Duration: ${duration}s" | tee -a "$RESULTS_FILE"
     elif [ $exit_code -eq 124 ]; then
-        echo "⏱️  TIMEOUT (60s)" | tee -a "$RESULTS_FILE"
+        echo "[TIMEOUT] Test timed out after 60s" | tee -a "$RESULTS_FILE"
         duration="TIMEOUT"
     else
-        echo "❌ FAILED - Exit code: $exit_code" | tee -a "$RESULTS_FILE"
+        echo "[FAIL] Exit code: $exit_code" | tee -a "$RESULTS_FILE"
     fi
     
     echo "" | tee -a "$RESULTS_FILE"
@@ -103,5 +103,5 @@ printf "%-50s | %10s\n" "T8: ComplexSparkTest (Byzantine 33%)" "${TIMINGS[T8]}" 
 printf "%-50s | %10s\n" "T9: ComplexSparkTest (Byzantine + Driver Verify)" "${TIMINGS[T9]}" | tee -a "$RESULTS_FILE"
 echo "--------------------------------------------------------------------------------" | tee -a "$RESULTS_FILE"
 echo "" | tee -a "$RESULTS_FILE"
-echo "✅ All tests completed!" | tee -a "$RESULTS_FILE"
-echo "📊 Full results saved to: $RESULTS_FILE" | tee -a "$RESULTS_FILE"
+echo "[DONE] All tests completed!" | tee -a "$RESULTS_FILE"
+echo "[INFO] Full results saved to: $RESULTS_FILE" | tee -a "$RESULTS_FILE"

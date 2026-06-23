@@ -610,104 +610,7 @@ private[spark] class Executor(
         // Use modulo arithmetic for deterministic, evenly-distributed Byzantine selection
         val shouldBeByzantine = byzantineInterval > 0 && (taskId % byzantineInterval == 0)
         
-        if(honestFlag == "False" && shouldBeByzantine && !isVerificationTask) {
-          logInfo(s"[BYZANTINE CONFIG] Task $taskId is Byzantine (taskId % $byzantineInterval == 0)")
-          logInfo(s"[BYZANTINE TEST] TRYING TO CHEAT- EXECUTOR: $taskId - injecting different hash but keeping same result type")
 
-          val modifiedBytes = valueBytes.array().clone()
-          logInfo(s"[BYZANTINE TEST] EXECUTOR: $taskId - Result bytes length: ${modifiedBytes.length}")
-          // CONSERVATIVE STRATEGY: Flip only last 10% to stay far from type descriptors (headers, etc)
-
-          if (modifiedBytes.length >= 20) {
-            // CASE 1: Normal results (≥20 bytes)
-            // Flip last 10% of bytes (guaranteed to be data/padding, not type headers)
-            val bytesToFlip = (modifiedBytes.length * 0.1).toInt
-            val startIdx = modifiedBytes.length - bytesToFlip
-            for (i <- startIdx until modifiedBytes.length) {
-              modifiedBytes(i) = (modifiedBytes(i) ^ 0xFF).toByte
-            }
-          } else if (modifiedBytes.length >= 2) {
-            // CASE 2: Very small results (2-19 bytes)
-            // Flip only the LAST BYTE (guaranteed to be data/padding)
-            val lastIdx = modifiedBytes.length - 1
-            modifiedBytes(lastIdx) = (modifiedBytes(lastIdx) ^ 0xFF).toByte
-          } else {
-            // CASE 3: Too small or empty (<2 bytes)
-            // Cannot safely inject fault
-            logWarning(s"[BYZANTINE TEST] EXECUTOR: $taskId - Result too small (${modifiedBytes.length} bytes), cannot inject fault safely")
-          }
-          logInfo(s"[BYZANTINE TEST]  EXECUTOR: $taskId - Result bytes length: ${modifiedBytes.length}")
-          valueBytes = java.nio.ByteBuffer.wrap(modifiedBytes)
-
-          // Also corrupt the finals file so Merkle tree verification can detect the disagreement
-          // Without this, only the serialized result hash differs but the finals files are identical
-          try {
-            val appName = Option(SparkEnv.get)
-              .flatMap(e => Option(e.conf.get("spark.app.name", "unknown")))
-              .getOrElse("unknown")
-            val debugMode = sys.env.getOrElse("DEBUG_MODE", "false").toBoolean
-            val finalsFile = new java.io.File(
-              FileFormatUtils.buildFinalsPath(appName, task.stageId, taskDescription.index, task.partitionId, debugMode))
-
-            if (finalsFile.exists()) {
-              if (debugMode) {
-                // Text mode: read lines, modify last line's value
-                val src = scala.io.Source.fromFile(finalsFile)
-                val lines = src.getLines().toArray
-                src.close()
-                if (lines.nonEmpty) {
-                  val parts = lines.last.split("\\|", 2)
-                  if (parts.length == 2) {
-                    lines(lines.length - 1) = s"${parts(0)}|BYZANTINE_CORRUPTED"
-                    val pw = new java.io.PrintWriter(finalsFile)
-                    lines.foreach(pw.println)
-                    pw.close()
-                    logInfo(s"[BYZANTINE TEST] Corrupted finals file (text): ${finalsFile.getName}")
-                  }
-                }
-              } else {
-                // Binary mode: parse entries, flip value bytes of the last entry
-                val fileBytes = java.nio.file.Files.readAllBytes(finalsFile.toPath)
-                if (fileBytes.length > 12) { // At least one entry: 8(Long) + 4(Int) + value
-                  var pos = 0
-                  var lastValueStart = -1
-                  var lastValueLen = 0
-                  val buf = java.nio.ByteBuffer.wrap(fileBytes)
-                  while (pos + 12 <= fileBytes.length) {
-                    buf.position(pos)
-                    val _uid = buf.getLong()
-                    val len = buf.getInt()
-                    if (len >= 0 && pos + 12 + len <= fileBytes.length) {
-                      lastValueStart = pos + 12
-                      lastValueLen = len
-                      pos += 12 + len
-                    } else {
-                      pos = fileBytes.length // malformed, stop
-                    }
-                  }
-                  if (lastValueStart >= 0 && lastValueLen > 0) {
-                    for (i <- lastValueStart until (lastValueStart + lastValueLen)) {
-                      fileBytes(i) = (fileBytes(i) ^ 0xFF).toByte
-                    }
-                    java.nio.file.Files.write(finalsFile.toPath, fileBytes)
-                    logInfo(s"[BYZANTINE TEST] Corrupted finals file (binary): ${finalsFile.getName}, " +
-                      s"flipped $lastValueLen value bytes of last entry")
-                  }
-                }
-              }
-            } else {
-              logWarning(s"[BYZANTINE TEST] Finals file not found: ${finalsFile.getAbsolutePath}")
-            }
-          } catch {
-            case e: Exception =>
-              logWarning(s"[BYZANTINE TEST] Failed to corrupt finals file: ${e.getMessage}")
-          }
-        }
-        logDebug(s"[BYZANTINE TEST] EXECUTOR: $taskId - valueBytes: ${valueBytes.array()}" +
-          s" length: ${valueBytes.array().length}" +
-          s" as array: ${valueBytes.array()}" +
-          s" as array: ${valueBytes.array().mkString(", ")}"
-        )
 
 
         val afterSerializationNs = System.nanoTime()
@@ -775,7 +678,8 @@ private[spark] class Executor(
         // Hash strategy depends on task type:
         // - ResultTask: Hash the actual result data (deterministic)
         // - ShuffleMapTask: Hash block sizes only (MapStatus metadata varies per executor)
-        val hashValueCandidate = if (task.isInstanceOf[ShuffleMapTask]) {
+        // Compute honest hash first
+        val honestHash = if (task.isInstanceOf[ShuffleMapTask]) {
           // For ShuffleMapTask: Hash block sizes (deterministic across replicas)
           // MapStatus includes BlockManagerId which is non-deterministic
           val mapStatus = value.asInstanceOf[MapStatus]
@@ -805,6 +709,89 @@ private[spark] class Executor(
           // For ResultTask: Hash the full serialized result (current behavior)
           TaskResultVerificationManager.computeTaskResultHash(valueBytes).toLong
         }
+        
+        // BYZANTINE FAULT INJECTION: Corrupt hash only, keep valueBytes intact
+        val hashValueCandidate = if (honestFlag == "False" && shouldBeByzantine && !isVerificationTask) {
+          logInfo(s"[BYZANTINE CONFIG] Task $taskId is Byzantine (taskId % $byzantineInterval == 0)")
+          logInfo(s"[BYZANTINE TEST] TRYING TO CHEAT - EXECUTOR: $taskId - corrupting hash only, keeping result bytes valid")
+          
+          // Generate random bit pattern for hash corruption
+          val random = new scala.util.Random(taskId) // Seed with taskId for reproducibility
+          val randomBitPattern = random.nextLong()
+          val byzantineHash = honestHash ^ randomBitPattern
+          
+           logInfo(s"[BYZANTINE TEST] Hash corruption: honest=$honestHash -> byzantine=$byzantineHash (XOR with $randomBitPattern)")
+          
+          // Also corrupt the finals file so Merkle tree verification can detect the disagreement
+          // Without this, only the serialized result hash differs but the finals files are identical
+          try {
+            val appName = Option(SparkEnv.get)
+              .flatMap(e => Option(e.conf.get("spark.app.name", "unknown")))
+              .getOrElse("unknown")
+            val debugMode = sys.env.getOrElse("DEBUG_MODE", "false").toBoolean
+            val finalsFile = new java.io.File(
+              FileFormatUtils.buildFinalsPath(appName, task.stageId, taskDescription.index, task.partitionId, debugMode))
+
+            if (finalsFile.exists()) {
+              if (debugMode) {
+                // Text mode: read lines, modify last line's value
+                val src = scala.io.Source.fromFile(finalsFile)
+                val lines = src.getLines().toArray
+                src.close()
+                if (lines.nonEmpty) {
+                  val parts = lines.last.split("\\|", 2)
+                  if (parts.length == 2) {
+                    lines(lines.length - 1) = s"${parts(0)}|BYZANTINE_CORRUPTED_${random.nextInt().abs}"
+                    val pw = new java.io.PrintWriter(finalsFile)
+                    lines.foreach(pw.println)
+                    pw.close()
+                    logInfo(s"[BYZANTINE TEST] Corrupted finals file (text): ${finalsFile.getName}")
+                  }
+                }
+              } else {
+                // Binary mode: flip 2 random bytes in last entry's value
+                val fileBytes = java.nio.file.Files.readAllBytes(finalsFile.toPath)
+                if (fileBytes.length > 12) { // At least one entry: 8(Long) + 4(Int) + value
+                  var pos = 0
+                  var lastValueStart = -1
+                  var lastValueLen = 0
+                  val buf = java.nio.ByteBuffer.wrap(fileBytes)
+                  while (pos + 12 <= fileBytes.length) {
+                    buf.position(pos)
+                    val _uid = buf.getLong()
+                    val len = buf.getInt()
+                    if (len >= 0 && pos + 12 + len <= fileBytes.length) {
+                      lastValueStart = pos + 12
+                      lastValueLen = len
+                      pos += 12 + len
+                    } else {
+                      pos = fileBytes.length // malformed, stop
+                    }
+                  }
+                  if (lastValueStart >= 0 && lastValueLen >= 2) {
+                    // Flip 2 random bytes within the value
+                    val byte1Idx = lastValueStart + random.nextInt(lastValueLen)
+                    val byte2Idx = lastValueStart + random.nextInt(lastValueLen)
+                    fileBytes(byte1Idx) = (fileBytes(byte1Idx) ^ 0xFF).toByte
+                    fileBytes(byte2Idx) = (fileBytes(byte2Idx) ^ 0xFF).toByte
+                    java.nio.file.Files.write(finalsFile.toPath, fileBytes)
+                    logInfo(s"[BYZANTINE TEST] Corrupted finals file (binary): ${finalsFile.getName}, flipped bytes at positions $byte1Idx, $byte2Idx")
+                  }
+                }
+              }
+            } else {
+              logWarning(s"[BYZANTINE TEST] Finals file not found: ${finalsFile.getAbsolutePath}")
+            }
+          } catch {
+            case e: Exception =>
+              logWarning(s"[BYZANTINE TEST] Failed to corrupt finals file: ${e.getMessage}")
+          }
+          
+          byzantineHash // Return corrupted hash
+        } else {
+          honestHash // Return honest hash
+        }
+        
         metricPeaks = metricPeaks :+ hashValueCandidate
         // TODO: do not serialize value twice
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)

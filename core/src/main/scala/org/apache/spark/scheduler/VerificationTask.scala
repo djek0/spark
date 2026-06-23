@@ -39,9 +39,9 @@ case class VerificationVerdict(
   def logVerdict(): String = {
     verdict match {
       case "REPLICA_1_CORRECT" =>
-        s"[✓] VERDICT: Replica 1 (idx$replicaIndex1) is CORRECT, Replica 2 (idx$replicaIndex2) is BYZANTINE"
+        s"[VERDICT] Replica 1 (idx$replicaIndex1) is CORRECT, Replica 2 (idx$replicaIndex2) is BYZANTINE"
       case "REPLICA_2_CORRECT" =>
-        s"[✓] VERDICT: Replica 2 (idx$replicaIndex2) is CORRECT, Replica 1 (idx$replicaIndex1) is BYZANTINE"
+        s"[VERDICT] Replica 2 (idx$replicaIndex2) is CORRECT, Replica 1 (idx$replicaIndex1) is BYZANTINE"
       case "BOTH_MATCH" =>
         s"[?] UNEXPECTED: Both replicas match verifier - possible race condition"
       case "NEITHER_MATCH" =>
@@ -179,7 +179,39 @@ private[spark] class VerificationTask(
         logInfo(s"[VERIFICATION] Replica 2 (idx$replicaIndex2) hash: $replicaHash2")
         
         val result = originalTask.runTask(context)
-        val verifierHash = TaskResultVerificationManager.computeTaskResultHash(result)
+        
+        // Use same hashing logic as Executor.scala for consistency
+        val verifierHash = if (originalTask.isInstanceOf[ShuffleMapTask]) {
+          // For ShuffleMapTask: Hash block sizes (deterministic across replicas)
+          // MapStatus includes BlockManagerId which is non-deterministic
+          val mapStatus = result.asInstanceOf[MapStatus]
+          
+          // Collect all block sizes
+          // Strategy: Iterate until we hit an out-of-bounds (exception happens once)
+          // For typical jobs (< 10k partitions), this is faster than alternatives
+          val blockSizes = {
+            val builder = scala.collection.mutable.ArrayBuffer[Long]()
+            var idx = 0
+            try {
+              while (true) {
+                builder += mapStatus.getSizeForBlock(idx)
+                idx += 1
+              }
+            } catch {
+              case _: ArrayIndexOutOfBoundsException => // Expected - marks end of array
+            }
+            builder.toSeq
+          }
+          val sizeString = blockSizes.mkString(",")
+          logInfo(s"[VERIFICATION SHUFFLE HASH] Hashing ${blockSizes.length} block sizes: ${sizeString.take(200)}...")
+          TaskResultVerificationManager.computeTaskResultHash(
+            java.nio.ByteBuffer.wrap(sizeString.getBytes("UTF-8"))
+          )
+        } else {
+          // For ResultTask: Hash the full serialized result (current behavior)
+          TaskResultVerificationManager.computeTaskResultHash(result)
+        }
+        
         logInfo(s"[VERIFICATION] Verifier hash: $verifierHash")
         
         val verdict = (verifierHash == replicaHash1, verifierHash == replicaHash2) match {
