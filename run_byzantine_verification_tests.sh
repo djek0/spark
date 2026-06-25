@@ -106,42 +106,42 @@ STATUSES["T1"]=$(echo "$result" | cut -d'|' -f2)
 echo "" | tee -a "$RESULTS_FILE"
 echo "=== TEST 2: Byzantine - Driver Full Task Recomputation ===" | tee -a "$RESULTS_FILE"
 echo "Config: EXEC_VERIFICATION=false, MERKLE_VERIFICATION=false" | tee -a "$RESULTS_FILE"
-result=$(run_test "2" "Driver Full Task" "HONEST=False" "BYZANTINE_PROBABILITY=4" "EXEC_VERIFICATION=false" "MERKLE_VERIFICATION=false")
+result=$(run_test "2" "Driver Full Task" "HONEST=False" "BYZANTINE_PROBABILITY=10" "EXEC_VERIFICATION=false" "MERKLE_VERIFICATION=false")
 TIMINGS["T2"]=$(echo "$result" | cut -d'|' -f1)
 STATUSES["T2"]=$(echo "$result" | cut -d'|' -f2)
 
 echo "" | tee -a "$RESULTS_FILE"
 echo "=== TEST 3: Byzantine - Driver Merkle (Trees on Driver) ===" | tee -a "$RESULTS_FILE"
 echo "Config: EXEC_VERIFICATION=false, MERKLE_VERIFICATION=true, MERKLE_BUILD_ON_DRIVER=true" | tee -a "$RESULTS_FILE"
-result=$(run_test "3" "Driver Merkle (Trees on Driver)" "HONEST=False" "BYZANTINE_PROBABILITY=4" "EXEC_VERIFICATION=false" "MERKLE_VERIFICATION=true" "MERKLE_BUILD_ON_DRIVER=true")
+result=$(run_test "3" "Driver Merkle (Trees on Driver)" "HONEST=False" "BYZANTINE_PROBABILITY=10" "EXEC_VERIFICATION=false" "MERKLE_VERIFICATION=true" "MERKLE_BUILD_ON_DRIVER=true")
 TIMINGS["T3"]=$(echo "$result" | cut -d'|' -f1)
 STATUSES["T3"]=$(echo "$result" | cut -d'|' -f2)
 
 echo "" | tee -a "$RESULTS_FILE"
 echo "=== TEST 4: Byzantine - Driver Merkle (Trees on Executors) ===" | tee -a "$RESULTS_FILE"
 echo "Config: EXEC_VERIFICATION=false, MERKLE_VERIFICATION=true, MERKLE_BUILD_ON_DRIVER=false" | tee -a "$RESULTS_FILE"
-result=$(run_test "4" "Driver Merkle (Trees on Executors)" "HONEST=False" "BYZANTINE_PROBABILITY=4" "EXEC_VERIFICATION=false" "MERKLE_VERIFICATION=true" "MERKLE_BUILD_ON_DRIVER=false")
+result=$(run_test "4" "Driver Merkle (Trees on Executors)" "HONEST=False" "BYZANTINE_PROBABILITY=10 " "EXEC_VERIFICATION=false" "MERKLE_VERIFICATION=true" "MERKLE_BUILD_ON_DRIVER=false")
 TIMINGS["T4"]=$(echo "$result" | cut -d'|' -f1)
 STATUSES["T4"]=$(echo "$result" | cut -d'|' -f2)
 
 echo "" | tee -a "$RESULTS_FILE"
 echo "=== TEST 5: Byzantine - 3rd Executor Full Task Recomputation ===" | tee -a "$RESULTS_FILE"
 echo "Config: EXEC_VERIFICATION=true, MERKLE_VERIFICATION=false" | tee -a "$RESULTS_FILE"
-result=$(run_test "5" "3rd Executor Full Task" "HONEST=False" "BYZANTINE_PROBABILITY=4" "EXEC_VERIFICATION=true" "MERKLE_VERIFICATION=false")
+result=$(run_test "5" "3rd Executor Full Task" "HONEST=False" "BYZANTINE_PROBABILITY=10" "EXEC_VERIFICATION=true" "MERKLE_VERIFICATION=false")
 TIMINGS["T5"]=$(echo "$result" | cut -d'|' -f1)
 STATUSES["T5"]=$(echo "$result" | cut -d'|' -f2)
 
 echo "" | tee -a "$RESULTS_FILE"
 echo "=== TEST 6: Byzantine - 3rd Executor Merkle (Trees on Driver) ===" | tee -a "$RESULTS_FILE"
 echo "Config: EXEC_VERIFICATION=true, MERKLE_VERIFICATION=true, MERKLE_BUILD_ON_DRIVER=true" | tee -a "$RESULTS_FILE"
-result=$(run_test "6" "3rd Executor Merkle (Trees on Driver)" "HONEST=False" "BYZANTINE_PROBABILITY=4" "EXEC_VERIFICATION=true" "MERKLE_VERIFICATION=true" "MERKLE_BUILD_ON_DRIVER=true")
+result=$(run_test "6" "3rd Executor Merkle (Trees on Driver)" "HONEST=False" "BYZANTINE_PROBABILITY=10" "EXEC_VERIFICATION=true" "MERKLE_VERIFICATION=true" "MERKLE_BUILD_ON_DRIVER=true")
 TIMINGS["T6"]=$(echo "$result" | cut -d'|' -f1)
 STATUSES["T6"]=$(echo "$result" | cut -d'|' -f2)
 
 echo "" | tee -a "$RESULTS_FILE"
 echo "=== TEST 7: Byzantine - 3rd Executor Merkle (Trees on Executors) ===" | tee -a "$RESULTS_FILE"
 echo "Config: EXEC_VERIFICATION=true, MERKLE_VERIFICATION=true, MERKLE_BUILD_ON_DRIVER=false" | tee -a "$RESULTS_FILE"
-result=$(run_test "7" "3rd Executor Merkle (Trees on Executors)" "HONEST=False" "BYZANTINE_PROBABILITY=4" "EXEC_VERIFICATION=true" "MERKLE_VERIFICATION=true" "MERKLE_BUILD_ON_DRIVER=false")
+result=$(run_test "7" "3rd Executor Merkle (Trees on Executors)" "HONEST=False" "BYZANTINE_PROBABILITY=10" "EXEC_VERIFICATION=true" "MERKLE_VERIFICATION=true" "MERKLE_BUILD_ON_DRIVER=false")
 TIMINGS["T7"]=$(echo "$result" | cut -d'|' -f1)
 STATUSES["T7"]=$(echo "$result" | cut -d'|' -f2)
 

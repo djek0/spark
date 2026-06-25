@@ -22,6 +22,9 @@ import java.util.Properties
 /**
  * A set of tasks submitted together to the low-level TaskScheduler, usually representing
  * missing partitions of a particular stage.
+ * @param isAuxiliary If true, this TaskSet is auxiliary (verification/Merkle) and should not
+ *                    trigger zombie logic for other TaskSets with the same stageId. Auxiliary
+ *                    TaskSets run alongside the original stage without conflicting.
  */
 private[spark] class TaskSet(
     val tasks: Array[Task[_]],
@@ -29,7 +32,8 @@ private[spark] class TaskSet(
     val stageAttemptId: Int,
     val priority: Int,
     val properties: Properties,
-    val resourceProfileId: Int) {
+    val resourceProfileId: Int,
+    val isAuxiliary: Boolean = false) {
   val id: String = stageId + "." + stageAttemptId
 
   override def toString: String = "TaskSet " + id

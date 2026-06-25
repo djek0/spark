@@ -68,28 +68,31 @@ object TaskResultVerificationManager extends Logging {
   logInfo(s"[CONFIG] Build Merkle trees on driver: $buildMerkleTreesOnDriver")
 
   /**
-   * Detects if a stage reads from shuffle data by checking stage hierarchy.
-   * Driver cannot execute tasks that read shuffle due to missing TaskMemoryManager infrastructure.
+   * Detects if a stage involves shuffle operations (reads OR writes shuffle).
+   * Driver cannot execute such tasks due to missing TaskMemoryManager infrastructure.
    * 
    * @param stageId Stage ID to check
-   * @return true if stage has parent stages (reads shuffle), false otherwise
+   * @return true if stage reads from shuffle OR is a ShuffleMapStage (writes shuffle)
    */
   private def stageReadsFromShuffle(stageId: Int): Boolean = {
     val stageOpt = dagScheduler.stageIdToStage.get(stageId)
     stageOpt match {
       case Some(stage) =>
-        // Any stage (ResultStage or ShuffleMapStage) with parents reads shuffle
-        val readsFromShuffle = stage.parents.nonEmpty
-        val stageType = stage match {
-          case _: ResultStage => "ResultStage"
-          case _: ShuffleMapStage => "ShuffleMapStage"
+        stage match {
+          case _: ShuffleMapStage =>
+            // ShuffleMapStage writes shuffle data - driver cannot execute (needs TaskMemoryManager)
+            logInfo(s"[SHUFFLE DETECTION] Stage $stageId is ShuffleMapStage - WRITES shuffle (driver unsupported)")
+            true
+          case _: ResultStage =>
+            // ResultStage may read from shuffle if it has parents
+            val readsFromShuffle = stage.parents.nonEmpty
+            if (readsFromShuffle) {
+              logInfo(s"[SHUFFLE DETECTION] Stage $stageId is ResultStage with ${stage.parents.length} parent(s) - READS from shuffle")
+            } else {
+              logInfo(s"[SHUFFLE DETECTION] Stage $stageId is ResultStage with no parents - no shuffle operations")
+            }
+            readsFromShuffle
         }
-        if (readsFromShuffle) {
-          logInfo(s"[SHUFFLE DETECTION] Stage $stageId is $stageType with ${stage.parents.length} parent(s) - READS from shuffle")
-        } else {
-          logInfo(s"[SHUFFLE DETECTION] Stage $stageId is $stageType with no parents - does NOT read from shuffle")
-        }
-        readsFromShuffle
       case None =>
         logWarning(s"[SHUFFLE DETECTION] Stage $stageId not found in stageIdToStage map")
         false
@@ -383,15 +386,15 @@ object TaskResultVerificationManager extends Logging {
     
     logInfo(s"[VERIFICATION] Dispatching: EXEC_VERIFICATION=$useExecutorVerification, MERKLE_VERIFICATION=$useMerkleVerification")
     
-    // Check if stage reads from shuffle (driver cannot execute such tasks)
-    val readsFromShuffle = stageReadsFromShuffle(stageId)
+    // Check if stage involves shuffle operations (driver cannot execute such tasks)
+    val involvesShuffleOps = stageReadsFromShuffle(stageId)
 
-    // Auto-switch to executor verification if driver verification was requested but stage reads shuffle
-    if (readsFromShuffle && !useExecutorVerification) {
-      logWarning(s"[DISPATCH] Stage $stageId reads from shuffle - driver verification NOT supported")
-      logWarning(s"[DISPATCH] Reason: Driver TaskContext has taskMemoryManager=null, causing NullPointerException during shuffle read")
+    // Auto-switch to executor verification if driver verification was requested but stage involves shuffle
+    if (involvesShuffleOps && !useExecutorVerification) {
+      logWarning(s"[DISPATCH] Stage $stageId involves shuffle operations - driver verification NOT supported")
+      logWarning(s"[DISPATCH] Reason: Driver TaskContext has taskMemoryManager=null, causing NullPointerException during shuffle read/write")
       logWarning(s"[DISPATCH] Auto-switching to THIRD EXECUTOR verification for safety")
-      logWarning(s"[DISPATCH] To avoid this, set EXEC_VERIFICATION=true for stages after shuffle")
+      logWarning(s"[DISPATCH] To avoid this warning, set EXEC_VERIFICATION=true for stages with shuffle operations")
       verifyOnThirdExecutor(stageId, index1, index2, partitionId, taskScheduler)
     } else if (useExecutorVerification) {
       verifyOnThirdExecutor(stageId, index1, index2, partitionId, taskScheduler)
@@ -460,8 +463,8 @@ object TaskResultVerificationManager extends Logging {
                 logInfo(s"[THIRD-EXECUTOR] Replica idx$byzantineIdx is BYZANTINE (timeout)")
                 // Determine verdict based on which index is correct
                 val verdict = if (correctIdx == index1) "REPLICA_1_CORRECT" else "REPLICA_2_CORRECT"
-                dagScheduler.completeVerificationWithVerdict(stageId, index1, index2, partitionId, verdict, None)
-                // Verification complete - no need to submit to third executor
+                dagScheduler.eventProcessLoop.post(
+                  VerificationVerdictEvent(stageId, index1, index2, partitionId, verdict, None))                // Verification complete - no need to submit to third executor
 
               case Some((uid, leafHash1, leafHash2)) if uid == -2L =>
                 // UID mismatch: potential swap attack detected
@@ -554,13 +557,20 @@ object TaskResultVerificationManager extends Logging {
     )
 
     // Wrap in TaskSet with single task
+    // CRITICAL FIX: Use a very high stageAttemptId to avoid collision with original TaskSet
+    // Original TaskSet typically has stageAttemptId = 0
+    // Verification TaskSets use stageAttemptId = 1000000 + partitionId to ensure uniqueness
+    // This prevents verification TaskSet completion from removing the original TaskSet from pool
+    val verificationStageAttemptId = 1000000 + task.partitionId
+    
     val verificationTaskSet = new TaskSet(
       tasks = Array(verificationTask),
-      stageId = task.stageId,
-      stageAttemptId = task.stageAttemptId,
-      priority = Int.MinValue,  // Highest priority (lowest value = highest priority in FIFO)
+      stageId = task.stageId,  // Use ORIGINAL stageId to stay part of the same stage
+      stageAttemptId = verificationStageAttemptId,  // Unique attempt ID for verification
+      priority = Int.MaxValue,  // Lowest priority - let original tasks complete first
       properties = task.localProperties,
-      resourceProfileId = 0  // Default resource profile
+      resourceProfileId = 0,  // Default resource profile
+      isAuxiliary = true  // Mark as auxiliary to prevent zombie conflicts
     )
 
     // Store metadata so we can process result when task completes
@@ -626,11 +636,10 @@ object TaskResultVerificationManager extends Logging {
 
           case _ =>
             // Report verdict to DAGScheduler (REPLICA_1_CORRECT, REPLICA_2_CORRECT, BOTH_MATCH)
-            dagScheduler.completeVerificationWithVerdict(
-              stageId, index1, index2, partitionId,
-              verdict.verdict,
-              verifierResult = None
-            )
+            dagScheduler.eventProcessLoop.post(
+              VerificationVerdictEvent(stageId, index1, index2, partitionId,
+                verdict.verdict,
+                verifierResult = None))
         }
 
       case _ =>
@@ -765,7 +774,7 @@ object TaskResultVerificationManager extends Logging {
             taskAttemptId = -1L,  // Special ID for driver execution
             attemptNumber = 0,
             taskIndex = index1,   // Use replica 1's taskIndex
-            taskMemoryManager = null,  // Driver doesn't need this
+            taskMemoryManager = null,  // Driver doesn't need this (only for non-shuffle tasks)
             localProperties = task.localProperties,
             metricsSystem = SparkEnv.get.metricsSystem,
             taskMetrics = TaskMetrics.empty,  // Constructor uses taskMetrics, not metrics
@@ -1081,13 +1090,18 @@ object TaskResultVerificationManager extends Logging {
           )
           
           // Submit both tasks as a single TaskSet
+          // CRITICAL FIX: Use unique stageAttemptId to avoid collision with original TaskSet
+          // Merkle TaskSets use stageAttemptId = 2000000 + partitionId
+          val merkleStageAttemptId = 2000000 + partitionId
+          
           val taskSet = new TaskSet(
             tasks = Array(task1, task2),
-            stageId = stageId,
-            stageAttemptId = 0,
-            priority = Int.MinValue,  // Highest priority (lowest value = highest priority in FIFO)
+            stageId = stageId,  // Use ORIGINAL stageId to stay part of the same stage
+            stageAttemptId = merkleStageAttemptId,  // Unique attempt ID for Merkle
+            priority = Int.MaxValue,  // Lowest priority - let original tasks complete first
             properties = new java.util.Properties(),
-            resourceProfileId = 0
+            resourceProfileId = 0,
+            isAuxiliary = true  // Mark as auxiliary to prevent zombie conflicts
           )
           
         logInfo(s"[MERKLE] Submitting TaskSet with 2 tree build tasks")

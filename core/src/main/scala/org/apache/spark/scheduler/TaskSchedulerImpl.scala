@@ -273,8 +273,12 @@ private[spark] class TaskSchedulerImpl(
       // and somehow it has missing map outputs, then DAGScheduler will resubmit it and create a
       // TSM3 for it. As a stage can't have more than one active task set managers, we must mark
       // TSM2 as zombie (it actually is).
-      stageTaskSets.foreach { case (_, ts) =>
-        ts.isZombie = true
+      // EXCEPTION: Auxiliary TaskSets (verification/Merkle) should NOT trigger zombie logic,
+      // as they run alongside the original stage without replacing it.
+      if (!taskSet.isAuxiliary) {
+        stageTaskSets.foreach { case (_, ts) =>
+          ts.isZombie = true
+        }
       }
       stageTaskSets(taskSet.stageAttemptId) = manager
       schedulableBuilder.addTaskSetManager(manager, manager.taskSet.properties)

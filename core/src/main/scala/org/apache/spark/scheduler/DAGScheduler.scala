@@ -1422,6 +1422,7 @@ private[spark] class DAGScheduler(
 
     // Figure out the indexes of partition ids to compute.
     val partitionsToCompute: Seq[Int] = stage.findMissingPartitions()
+    logInfo(s"[TASK SUBMIT] Stage ${stage.id}: partitionsToCompute = ${partitionsToCompute.mkString(",")} (${partitionsToCompute.size} partitions)")
 
     // Use the scheduling pool, job group, description, etc. from an ActiveJob associated
     // with this Stage
@@ -1591,12 +1592,17 @@ private[spark] class DAGScheduler(
         s"tasks are for partitions ${tasks.take(15).map(_.partitionId)})")
       logInfo(s"[+] Created ${tasks.size} replica tasks for ${partitionsToCompute.size} partitions (2x replication)")
       
+      val tasksArray = tasks.toArray
+      logInfo(s"[TASK SUBMIT] Stage ${stage.id}: Created ${tasksArray.size} tasks, submitting to TaskScheduler")
+      tasksArray.zipWithIndex.foreach { case (task, idx) =>
+        logInfo(s"[TASK SUBMIT]   Task $idx: partitionId=${task.partitionId}")
+      }
       taskScheduler.submitTasks(new TaskSet(
-        tasks.toArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties,
+        tasksArray, stage.id, stage.latestInfo.attemptNumber, jobId, properties,
         stage.resourceProfileId))
       
       // Task replication: Track tasks per stage for completion batching
-      addTasksPerStage(stage.id, tasks.toArray.size)
+      addTasksPerStage(stage.id, tasksArray.size)
     } else {
       // Because we posted SparkListenerStageSubmitted earlier, we should mark
       // the stage as completed here in case there are no tasks to run
@@ -1830,6 +1836,7 @@ private[spark] class DAGScheduler(
         // With different-index approach: replicas have indices 0,1 for partition 0; 2,3 for partition 1
         // So we use taskIndex/2 to map to partition ID for batching
         val partitionId = taskIndex / 2
+        logInfo(s"[BATCHING] Task completion: stageId=$stageId, taskId=${event.taskInfo.taskId}, taskIndex=$taskIndex, partitionId=$partitionId")
         logDebug(s"Processing task completion: stageId=$stageId, taskIndex=$taskIndex, partitionId=$partitionId")
         if (unpostedTaskEndEvent.contains(stageId)) {
           if (unpostedTaskEndEvent(stageId).contains(partitionId)) {
@@ -1952,13 +1959,13 @@ private[spark] class DAGScheduler(
             // else: current event is Success, continue normal flow below
           }
           else {
-            logDebug(s"[*] First replica complete for partition $partitionId, waiting for partner")
+            logInfo(s"[BATCHING] First replica for partition $partitionId (taskId=${event.taskInfo.taskId}), waiting for partner")
             unpostedTaskEndEvent(stageId)(partitionId) = event
             return  // Return early, wait for second replica
           }
         }
         else {
-          logDebug(s"[*] First task completion for stage $stageId, partition $partitionId, waiting for partner")
+          logInfo(s"[BATCHING] First task for stage $stageId, partition $partitionId (taskId=${event.taskInfo.taskId}), waiting for partner")
           unpostedTaskEndEvent(stageId) = HashMap(partitionId -> event)
           return  // Return early, wait for second replica
         }
@@ -2441,6 +2448,10 @@ private[spark] class DAGScheduler(
           handleTaskCompletion(correctEvent, bypassBatching = true)
           logInfo(s"[VERIFICATION] handleTaskCompletion returned successfully for partition $partitionId")
 
+          // CRITICAL: Revive offers to schedule remaining tasks after verification completes
+          // Cast to TaskSchedulerImpl to access backend (TaskScheduler trait doesn't expose this)
+          taskScheduler.asInstanceOf[TaskSchedulerImpl].backend.reviveOffers()
+          // Check if stage can now be finished (all verifications complete)
           // Check if stage can now be finished (all verifications complete)
           if (canMarkStageAsFinished(stageId) && !hasPendingVerifications(stageId)) {
             stageIdToStage.get(stageId).foreach { stage =>
@@ -2454,7 +2465,13 @@ private[spark] class DAGScheduler(
                     listenerBus.post(
                       SparkListenerJobEnd(job.jobId, clock.getTimeMillis(), JobSucceeded))
                   }
-                case _ => // Ignore non-ResultStage
+                case shuffleStage: ShuffleMapStage =>
+                  // ShuffleMapStage completed - trigger dependent stages
+                  logInfo(s"[+] ShuffleMapStage ${shuffleStage.id} completed after verification - submitting child stages")
+                  markStageAsFinished(shuffleStage)
+                  markMapStageJobsAsFinished(shuffleStage)
+                  submitWaitingChildStages(shuffleStage)
+                case _ => // Ignore other stage types
               }
             }
           }

@@ -671,7 +671,9 @@ private[spark] class TaskSetManager(
   }
 
   private def maybeFinishTaskSet(): Unit = {
+    logInfo(s"[MAYBE FINISH] TaskSet ${taskSet.id}: isZombie=$isZombie, runningTasks=$runningTasks, tasksSuccessful=$tasksSuccessful, numTasks=$numTasks")
     if (isZombie && runningTasks == 0) {
+      logInfo(s"[TASKSET FINISH] TaskSet ${taskSet.id}: isZombie=$isZombie, runningTasks=$runningTasks, tasksSuccessful=$tasksSuccessful, numTasks=$numTasks")
       sched.taskSetFinished(this)
       if (tasksSuccessful == numTasks) {
         healthTracker.foreach(_.updateExcludedForSuccessfulTaskSet(
@@ -879,6 +881,7 @@ private[spark] class TaskSetManager(
   def handleSuccessfulTask(tid: Long, result: DirectTaskResult[_]): Unit = {
     val info = taskInfos(tid)
     val index = info.index
+    logInfo(s"[HANDLE SUCCESS] TaskSet ${taskSet.id}, index=$index, tid=$tid, before: isZombie=$isZombie, tasksSuccessful=$tasksSuccessful, numTasks=$numTasks")
     logInfo(s"[REPLICATION] handleSuccessfulTask called: tid=$tid, index=$index, successful($index)=${successful(index)}, killedByOtherAttempt.contains($tid)=${killedByOtherAttempt.contains(tid)}")
     // Check if any other attempt succeeded before this and this attempt has not been handled
     if (successful(index) && killedByOtherAttempt.contains(tid)) {
@@ -945,6 +948,7 @@ private[spark] class TaskSetManager(
       // Mark successful and stop if all the tasks have succeeded.
       successful(index) = true
       if (tasksSuccessful == numTasks) {
+        logInfo(s"[ZOMBIE] TaskSet ${taskSet.id} becoming zombie: all tasks succeeded ($tasksSuccessful/$numTasks)")
         isZombie = true
       }
     } else {
@@ -963,15 +967,21 @@ private[spark] class TaskSetManager(
   }
 
   private[scheduler] def markPartitionCompleted(partitionId: Int): Unit = {
+    logInfo(s"[MARK PARTITION] TaskSet ${taskSet.id}, partitionId=$partitionId, before: isZombie=$isZombie, tasksSuccessful=$tasksSuccessful, numTasks=$numTasks")
     partitionToIndex.get(partitionId).foreach { indices =>
       // Mark all replica tasks for this partition as successful
+      logInfo(s"[MARK PARTITION] TaskSet ${taskSet.id}, partition $partitionId has ${indices.length} replica indices: ${indices.mkString(",")}")
       indices.foreach { index =>
         if (!successful(index)) {
           tasksSuccessful += 1
+          logInfo(s"[MARK PARTITION] TaskSet ${taskSet.id}, marking index=$index successful, tasksSuccessful now=$tasksSuccessful")
           successful(index) = true
+        } else {
+          logInfo(s"[MARK PARTITION] TaskSet ${taskSet.id}, index=$index already marked successful")
         }
       }
       if (tasksSuccessful == numTasks) {
+        logInfo(s"[ZOMBIE] TaskSet ${taskSet.id} becoming zombie via markPartitionCompleted: all tasks succeeded ($tasksSuccessful/$numTasks)")
         isZombie = true
       }
       maybeFinishTaskSet()
@@ -1002,6 +1012,7 @@ private[spark] class TaskSetManager(
           successful(index) = true
           tasksSuccessful += 1
         }
+        logInfo(s"[ZOMBIE] TaskSet ${taskSet.id} becoming zombie due to FetchFailed: tasksSuccessful=$tasksSuccessful, numTasks=$numTasks")
         isZombie = true
 
         if (fetchFailed.bmAddress != null) {
@@ -1076,6 +1087,7 @@ private[spark] class TaskSetManager(
     }
 
     if (tasks(index).isBarrier) {
+      logInfo(s"[ZOMBIE] TaskSet ${taskSet.id} becoming zombie due to barrier task failure")
       isZombie = true
     }
 
@@ -1109,6 +1121,7 @@ private[spark] class TaskSetManager(
 
   def abort(message: String, exception: Option[Throwable] = None): Unit = sched.synchronized {
     // TODO: Kill running tasks if we were not terminated due to a Mesos error
+    logInfo(s"[ZOMBIE] TaskSet ${taskSet.id} becoming zombie due to abort: $message")
     sched.dagScheduler.taskSetFailed(taskSet, message, exception)
     isZombie = true
     maybeFinishTaskSet()

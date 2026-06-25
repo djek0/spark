@@ -25,11 +25,9 @@ object MerkleVsFullTaskComparison {
     val spark = SparkSession
       .builder()
       .appName("Merkle vs Full Task Comparison")
-      .master("local[8]")  // 8 cores
-      .config("spark.executor.instances", "4")
-      .config("spark.executor.cores", "2")
-      .config("spark.default.parallelism", "100")
-      .config("spark.sql.shuffle.partitions", "100")
+      .master("local[*]")  // Use all available cores (auto-detect)
+      .config("spark.default.parallelism", "12")  // Control shuffle partitions (not core count)
+      .config("spark.sql.shuffle.partitions", "12")  // Keep shuffles manageable
       .getOrCreate()
     
     println("=" * 80)
@@ -54,13 +52,19 @@ object MerkleVsFullTaskComparison {
     println("[PHASE 1] Generating and processing data...")
     val phaseStartTime = System.currentTimeMillis()
     
-    val partitions = 50
-    val elementsPerPartition = 100000  // 100k elements per partition = 5M total
+    val partitions = 32  // Increased for better parallelism and larger data
+    val elementsPerPartition = 50000  // 1.6M total elements (32 * 50k)
     
     val sc = spark.sparkContext
     val data = sc.parallelize(0L until (partitions * elementsPerPartition), partitions)
       .map { n => 
-        (n % 1000, n.toDouble)  // Create 1000 groups
+        // Heavy computation to make verification overhead visible
+        var sum = n.toDouble
+        // Simulate expensive computation (100 iterations)
+        for (i <- 1 to 100) {
+          sum = sum * 1.01 + math.sin(sum) + math.sqrt(math.abs(sum))
+        }
+        (n % 2000, sum)  // Create 2000 groups for larger shuffle
       }
     
     println(s"  Generated ${partitions * elementsPerPartition} elements across $partitions partitions")
@@ -72,11 +76,19 @@ object MerkleVsFullTaskComparison {
     val shuffleStartTime = System.currentTimeMillis()
     
     val result = data
-      .groupByKey()  // Shuffle → Creates ~1000 partitions → Verification triggers here
+      .groupByKey()  // Shuffle → Creates ~2000 partitions → Verification triggers here
       .mapValues { iter =>
-        // Each partition has ~5000 elements
-        // Byzantine faults corrupt 1-3 elements per partition (sparse faults)
-        iter.map(v => v * 2 + math.sqrt(v)).toArray
+        // Each partition has ~800 elements
+        // More expensive aggregation to increase result size
+        val values = iter.toArray
+        var result = 0.0
+        // Heavy aggregation
+        for (v <- values) {
+          for (i <- 1 to 10) {
+            result += v * i + math.log(math.abs(v) + 1)
+          }
+        }
+        result
       }
       .collect()
     
