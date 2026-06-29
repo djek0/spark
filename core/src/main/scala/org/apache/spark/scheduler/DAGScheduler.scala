@@ -1884,6 +1884,7 @@ private[spark] class DAGScheduler(
                   // Start timeout timer for verification (includes Merkle tree building in parallel)
                   // Adaptive timeout based on result size: larger data = more time needed
                   val baseTimeoutMs = sc.getConf.get("spark.verification.timeout", "20000").toInt
+                  val capMultiplier = sc.getConf.get("spark.verification.timeout.cap", "10.0").toDouble
                   val timeoutMs = try {
                     // Get size from DirectTaskResult
                     val resultSizeBytes = firstEvent.result match {
@@ -1893,10 +1894,10 @@ private[spark] class DAGScheduler(
                     }
                     val sizeMB = resultSizeBytes.toDouble / (1024 * 1024)
                     
-                    // Aggressive scaling: 1.0 + (sizeMB / 100), cap at 3.0x
+                    // Adaptive scaling: 1.0 + (sizeMB / 100), cap at configurable multiplier
                     // Full task recomputation scales with data size
-                    // 100MB = 2.0x (40s), 200MB = 3.0x (60s max)
-                    val sizeMultiplier = math.max(1.0, math.min(3.0, 1.0 + (sizeMB / 100.0)))
+                    // Default cap 10.0x: 100MB = 2.0x (40s), 1GB = 10.0x (200s max)
+                    val sizeMultiplier = math.max(1.0, math.min(capMultiplier, 1.0 + (sizeMB / 100.0)))
                     val adaptiveTimeout = (baseTimeoutMs * sizeMultiplier).toInt
                     
                     logInfo(s"[ADAPTIVE TIMEOUT] Result size: ${sizeMB}MB, " +

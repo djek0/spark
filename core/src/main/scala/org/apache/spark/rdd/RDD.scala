@@ -261,10 +261,17 @@ abstract class RDD[T: ClassTag](
   /**
    * Check if this RDD is a collapser that breaks per-element UID tracking.
    * Collapsers change element count/structure and should be excluded from UID tracking.
+   * This includes all transformations that break UID determinism or order guarantees.
    */
   private def isCollapserRDD: Boolean = {
     this.getClass.getSimpleName match {
-      case "CoalescedRDD" | "ShuffledRDD" | "UnionRDD" | "CartesianRDD" => true
+      // Repartitioning transformations (merge N parent partitions → 1 output partition within stage)
+      case "CoalescedRDD" => true
+      // Cross-product transformations (reads from 2 input iterators simultaneously)
+      case "CartesianRDD" => true
+      // Zipping transformations (reads from N input iterators, cannot determine single UID)
+      case "ZippedPartitionsRDD" => true
+      // Default: safe for UID tracking within the stage
       case _ => false
     }
   }
@@ -338,32 +345,98 @@ abstract class RDD[T: ClassTag](
       } else {
         computeOrReadCheckpoint(split, context)
       }
+      
+      // Update backup iterator if this RDD is safe for UID tracking
+      // This happens at every recursion level, not just outermost
+      val isSafe = !isCollapserRDD && !context.isVerificationTask
+      if (isSafe) {
+        Trace.updateBackupIterator(it)
+      } else {
+        // Mark correlation as permanently broken when encountering a collapser
+        // Once broken, downstream transformations cannot restore UID correlation
+        if (!Trace.isCorrelationBroken) {
+          Trace.markCorrelationBroken()
+        }
+      }
+      
       // Get app name safely from SparkEnv
       val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
       println("appName: " + appName)
-      if (isOutermost && !isCollapserRDD && !context.isVerificationTask) {
-        // Open finals writer (one per task), auto-close on completion
-        val outWriter = Trace.createOutputWriter(
-          stageId = context.stageId,
-          partitionId = split.index,
-          taskIndex = context.taskIndex(),
-          appName = appName
-        )
-        Option(context).foreach { ctx =>
-          ctx.addTaskCompletionListener[Unit](_ => try outWriter.safeClose() catch { case _: Throwable => () })
-        }
-
-        // Wrap the FINAL iterator so every pulled element is logged once
-        it.map { elem =>
-          Trace.logOutput(
-            writer = outWriter,
+      
+      if (isOutermost && !context.isVerificationTask) {
+        // Case A: Outer iterator is safe - use it for logging (standard case)
+        if (!isCollapserRDD) {
+          // Open finals writer (one per task), auto-close on completion
+          val outWriter = Trace.createOutputWriter(
             stageId = context.stageId,
             partitionId = split.index,
-            taskId = context.taskAttemptId(),
-            attempt = context.attemptNumber,
-            value = elem
+            taskIndex = context.taskIndex(),
+            appName = appName
           )
-          elem
+          Option(context).foreach { ctx =>
+            ctx.addTaskCompletionListener[Unit](_ => try outWriter.safeClose() catch { case _: Throwable => () })
+          }
+
+          // Wrap the FINAL iterator so every pulled element is logged once
+          it.map { elem =>
+            Trace.logOutput(
+              writer = outWriter,
+              stageId = context.stageId,
+              partitionId = split.index,
+              taskId = context.taskAttemptId(),
+              attempt = context.attemptNumber,
+              value = elem
+            )
+            elem
+          }
+        } 
+        // Case B: Outer iterator is unsafe - fallback to backup iterator
+        else {
+          Trace.getBackupIterator[T]() match {
+            case Some(backupIt) =>
+              // Use backup iterator for logging
+              val outWriter = Trace.createOutputWriter(
+                stageId = context.stageId,
+                partitionId = split.index,
+                taskIndex = context.taskIndex(),
+                appName = appName
+              )
+              Option(context).foreach { ctx =>
+                ctx.addTaskCompletionListener[Unit](_ => try outWriter.safeClose() catch { case _: Throwable => () })
+              }
+              
+              logInfo(s"[BACKUP ITERATOR] Using backup iterator for logging (outer is ${this.getClass.getSimpleName})")
+              
+              // Wrap backup iterator for logging
+              val loggedBackup = backupIt.map { elem =>
+                Trace.logOutput(
+                  writer = outWriter,
+                  stageId = context.stageId,
+                  partitionId = split.index,
+                  taskId = context.taskAttemptId(),
+                  attempt = context.attemptNumber,
+                  value = elem
+                )
+                elem
+              }
+              
+              // Materialize backup iterator to ensure logging happens
+              loggedBackup.foreach(_ => ())
+              
+              // Return original iterator for actual computation
+              it
+              
+            case None =>
+              // Case C: No safe iterator exists - create empty file
+              logWarning(s"[BACKUP ITERATOR] No safe iterator found for stage ${context.stageId}, partition ${split.index} - creating empty finals file")
+              Trace.createEmptyFinalsFile(
+                stageId = context.stageId,
+                partitionId = split.index,
+                taskIndex = context.taskIndex(),
+                appName = appName
+              )
+              it
+          }
         }
       } else {
         it

@@ -1,0 +1,7 @@
+Config,HONEST,BYZANTINE_PROB,EXEC_VERIFICATION,MERKLE_VERIFICATION,MERKLE_BUILD_ON_DRIVER,ExecutionTime_seconds,Status
+0-Baseline,True,N/A,N/A,N/A,N/A,2,FAIL
+1a-Executor-FullTask,False,10,true,false,N/A,2,FAIL
+1b-Executor-Merkle,False,10,true,true,N/A,2,FAIL
+2a-Driver-FullTask,False,10,false,false,N/A,2,FAIL
+2b-Driver-Merkle-TreesOnDriver,False,10,false,true,true,2,FAIL
+2c-Driver-Merkle-TreesOnExecutors,False,10,false,true,false,2,FAIL

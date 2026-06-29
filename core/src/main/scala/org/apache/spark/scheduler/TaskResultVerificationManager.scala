@@ -567,7 +567,7 @@ object TaskResultVerificationManager extends Logging {
       tasks = Array(verificationTask),
       stageId = task.stageId,  // Use ORIGINAL stageId to stay part of the same stage
       stageAttemptId = verificationStageAttemptId,  // Unique attempt ID for verification
-      priority = Int.MaxValue,  // Lowest priority - let original tasks complete first
+      priority = Int.MinValue,  // Highest priority - prioritise verification tasks to complete first
       properties = task.localProperties,
       resourceProfileId = 0,  // Default resource profile
       isAuxiliary = true  // Mark as auxiliary to prevent zombie conflicts
@@ -763,6 +763,13 @@ object TaskResultVerificationManager extends Logging {
         logError(s"[X] Cannot recompute: Task not found for stage $stageId, partition $partitionId")
         return
       case Some(task) =>
+        // Create TaskMemoryManager for driver execution (needed for shuffle reads)
+        // Declare outside try block so it's in scope for finally block cleanup
+        val taskMemoryManager = new org.apache.spark.memory.TaskMemoryManager(
+          SparkEnv.get.memoryManager,
+          -1L  // Special task ID for driver execution
+        )
+
         try {
           logInfo(s"[DRIVER RECOMPUTE] Running task on driver: partitionId=$partitionId")
 
@@ -774,7 +781,7 @@ object TaskResultVerificationManager extends Logging {
             taskAttemptId = -1L,  // Special ID for driver execution
             attemptNumber = 0,
             taskIndex = index1,   // Use replica 1's taskIndex
-            taskMemoryManager = null,  // Driver doesn't need this (only for non-shuffle tasks)
+            taskMemoryManager = taskMemoryManager,  // Provide memory manager for shuffle reads
             localProperties = task.localProperties,
             metricsSystem = SparkEnv.get.metricsSystem,
             taskMetrics = TaskMetrics.empty,  // Constructor uses taskMetrics, not metrics
@@ -909,7 +916,14 @@ object TaskResultVerificationManager extends Logging {
             // Note: We don't report verdict here - let timeout handle it
             // The timeout is our safety net for all driver failures (including exceptions)
         } finally {
+          // Clean up TaskContext and TaskMemoryManager
           TaskContext.unset()
+          try {
+            taskMemoryManager.cleanUpAllAllocatedMemory()
+          } catch {
+            case e: Exception =>
+              logWarning(s"[CLEANUP] Failed to clean up TaskMemoryManager: ${e.getMessage}")
+          }
         }
     }
   }
@@ -1098,7 +1112,7 @@ object TaskResultVerificationManager extends Logging {
             tasks = Array(task1, task2),
             stageId = stageId,  // Use ORIGINAL stageId to stay part of the same stage
             stageAttemptId = merkleStageAttemptId,  // Unique attempt ID for Merkle
-            priority = Int.MaxValue,  // Lowest priority - let original tasks complete first
+            priority = Int.MinValue,  // Highest priority - prioritise Merkle tasks to complete first
             properties = new java.util.Properties(),
             resourceProfileId = 0,
             isAuxiliary = true  // Mark as auxiliary to prevent zombie conflicts

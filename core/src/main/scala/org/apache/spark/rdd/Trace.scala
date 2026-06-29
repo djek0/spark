@@ -42,17 +42,76 @@ private[spark] object Trace extends Logging {
     override def initialValue(): AtomicLong = new AtomicLong(0L)
   }
 
+  // Backup iterator tracking for fallback logging
+  // Stores the last safe iterator encountered during recursive evaluation
+  private val backupIteratorTL = new ThreadLocal[Option[Iterator[Any]]] {
+    override def initialValue(): Option[Iterator[Any]] = None
+  }
+
+  // Correlation broken flag - once set, UID correlation is permanently lost
+  // for this iterator traversal and cannot be restored by downstream transformations
+  private val correlationBrokenTL = new ThreadLocal[Boolean] {
+    override def initialValue(): Boolean = false
+  }
+
   // Thread-local accessors
   private def q = uidQueueTL.get()
   private def ctr = uidCounterTL.get()
   
   private[rdd] def enterIter(): Boolean = {
     val d = depthTL.get().getAndIncrement() // fetch old value, then increment
+    if (d == 0) {
+      // Starting new outermost traversal - reset correlation state
+      correlationBrokenTL.set(false)
+    }
     d == 0 // true ⇒ this is the outermost iterator
   }
   
   private[rdd] def exitIter(): Unit = {
     depthTL.get().decrementAndGet()
+  }
+
+  /**
+   * Update the backup iterator if the current iterator is safe.
+   * Called from RDD.iterator() when encountering a safe transformation.
+   * Only updates if UID correlation hasn't been broken yet.
+   */
+  private[rdd] def updateBackupIterator[T](iterator: Iterator[T]): Unit = {
+    if (!isCorrelationBroken) {
+      backupIteratorTL.set(Some(iterator.asInstanceOf[Iterator[Any]]))
+    }
+  }
+
+  /**
+   * Get the backup iterator for fallback logging.
+   * Returns None if no safe iterator has been encountered.
+   */
+  private[rdd] def getBackupIterator[T](): Option[Iterator[T]] = {
+    backupIteratorTL.get().asInstanceOf[Option[Iterator[T]]]
+  }
+
+  /**
+   * Clear the backup iterator reference.
+   * Called at task initialization.
+   */
+  private[rdd] def clearBackupIterator(): Unit = {
+    backupIteratorTL.set(None)
+  }
+
+  /**
+   * Mark UID correlation as permanently broken for this iterator traversal.
+   * Called when encountering a collapser transformation that destroys UID correspondence.
+   * Once set, downstream transformations cannot restore UID correlation.
+   */
+  private[rdd] def markCorrelationBroken(): Unit = {
+    correlationBrokenTL.set(true)
+  }
+
+  /**
+   * Check if UID correlation has been broken in this iterator traversal.
+   */
+  private[rdd] def isCorrelationBroken: Boolean = {
+    correlationBrokenTL.get()
   }
 
   /**
@@ -62,6 +121,8 @@ private[spark] object Trace extends Logging {
   def initForTask(): Unit = {
     q.clear()
     ctr.set(0L)
+    clearBackupIterator()
+    correlationBrokenTL.set(false)
   }
 
   /**
@@ -71,6 +132,8 @@ private[spark] object Trace extends Logging {
   def cleanupForTask(): Unit = {
     q.clear()
     ctr.set(0L)
+    clearBackupIterator()
+    correlationBrokenTL.set(false)
   }
 
   // UID management
@@ -127,6 +190,21 @@ private[spark] object Trace extends Logging {
     val writer = new SafeWriter(file, binary = !DEBUG_MODE)
     activeWriters.put(Thread.currentThread().getName, writer)
     writer
+  }
+
+  /**
+   * Create an empty finals file when no safe iterator exists for UID tracking.
+   * This ensures verifier compatibility by creating the expected file structure.
+   */
+  def createEmptyFinalsFile(stageId: Int, partitionId: Int, taskIndex: Int, appName: String): Unit = {
+    val writer = createOutputWriter(stageId, partitionId, taskIndex, appName)
+    try {
+      writer.safeClose()  // Close immediately to create empty file
+      logInfo(s"[BACKUP ITERATOR] Created empty finals file for stage $stageId, partition $partitionId (no safe iterator)")
+    } catch {
+      case e: Exception =>
+        logWarning(s"[BACKUP ITERATOR] Failed to create empty finals file: ${e.getMessage}")
+    }
   }
 
   // Logging operations
