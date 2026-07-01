@@ -58,24 +58,35 @@ private[spark] class MapPartitionsRDD[U: ClassTag, T: ClassTag](
       // Category 1: 1→0/1 (Droppers) - filter operations
       // Dequeue UID per input; requeue only if kept
       inputIter.flatMap { value =>
-        val currentUid = Trace.dequeueUid()
-        val result = f(context, split.index, Iterator(value))
-        if (result.hasNext) {
-          Trace.enqueueUid(currentUid)
-          Some(result.next())
+        if (Trace.isCorrelationBroken) {
+          // No UID tracking - just apply filter
+          val result = f(context, split.index, Iterator(value))
+          if (result.hasNext) Some(result.next()) else None
         } else {
-          None
+          val currentUid = Trace.dequeueUid()
+          val result = f(context, split.index, Iterator(value))
+          if (result.hasNext) {
+            Trace.enqueueUid(currentUid)
+            Some(result.next())
+          } else {
+            None
+          }
         }
       }
     } else if (isExpanderOperation) {
       // Category 2: 1→M (Expanders) - flatMap, flatMapValues operations  
       // Each output element gets the same UID from its input (group-based semantics, lazy)
       inputIter.flatMap { value =>
-        val currentUid = Trace.dequeueUid()
-        val result = f(context, split.index, Iterator(value))
-        result.map { element =>
-          Trace.enqueueUid(currentUid)  // Enqueue UID for each output element lazily
-          element
+        if (Trace.isCorrelationBroken) {
+          // No UID tracking - just apply flatMap
+          f(context, split.index, Iterator(value))
+        } else {
+          val currentUid = Trace.dequeueUid()
+          val result = f(context, split.index, Iterator(value))
+          result.map { element =>
+            Trace.enqueueUid(currentUid)  // Enqueue UID for each output element lazily
+            element
+          }
         }
       }
     } else {

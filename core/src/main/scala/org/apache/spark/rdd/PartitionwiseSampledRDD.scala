@@ -70,20 +70,30 @@ private[spark] class PartitionwiseSampledRDD[T: ClassTag, U: ClassTag](
     val inputIter = firstParent[T].iterator(split.prev, context)
 
     inputIter.flatMap { value =>
-      val currentUid = Trace.dequeueUid()
-      val sampleCount = thisSampler.sample()
-      println(s"Current UID: $currentUid, Value: $value, Sample Count: $sampleCount")
-
-      if (sampleCount > 0) {
-        // For Bernoulli sampler: sampleCount = 1 (keep element once)
-        // For Poisson sampler: sampleCount = k (keep element k times with replacement)
-        (0 until sampleCount).iterator.map(_ => {
-          Trace.enqueueUid(currentUid)  // Preserve original UID for each sampled instance
-          value.asInstanceOf[U]
-        })
+      if (Trace.isCorrelationBroken) {
+        // No UID tracking - just apply sampling
+        val sampleCount = thisSampler.sample()
+        if (sampleCount > 0) {
+          (0 until sampleCount).iterator.map(_ => value.asInstanceOf[U])
+        } else {
+          Iterator.empty
+        }
       } else {
-        // Element not sampled - UID is discarded (not re-enqueued)
-        Iterator.empty
+        val currentUid = Trace.dequeueUid()
+        val sampleCount = thisSampler.sample()
+        println(s"Current UID: $currentUid, Value: $value, Sample Count: $sampleCount")
+
+        if (sampleCount > 0) {
+          // For Bernoulli sampler: sampleCount = 1 (keep element once)
+          // For Poisson sampler: sampleCount = k (keep element k times with replacement)
+          (0 until sampleCount).iterator.map(_ => {
+            Trace.enqueueUid(currentUid)  // Preserve original UID for each sampled instance
+            value.asInstanceOf[U]
+          })
+        } else {
+          // Element not sampled - UID is discarded (not re-enqueued)
+          Iterator.empty
+        }
       }
     }
   }

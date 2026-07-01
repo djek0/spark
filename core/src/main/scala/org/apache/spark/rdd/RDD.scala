@@ -594,9 +594,36 @@ abstract class RDD[T: ClassTag](
       // Block hit.
       case Left(blockResult) =>
         if (readCachedBlock) {
+          // Check if this cached RDD is a stage root
+          val isStageRoot = dependencies.isEmpty ||
+            dependencies.forall(_.isInstanceOf[ShuffleDependency[_, _, _]])
+          
+          if (isStageRoot) {
+            // Initialize UID tracking for stage root (even though we're reading from cache)
+            Trace.initForTask()
+            logInfo(s"[CACHE HIT] Stage root cache hit - initialized queue for stage ${context.stageId}, partition ${partition.index}")
+          }
+          
+          // Always mark correlation broken on cache hit (cached data has no UID correlation)
+          Trace.markCorrelationBroken()
+          logInfo(s"[CACHE HIT] Marked correlation broken for stage ${context.stageId}, partition ${partition.index}")
+          
           val existingMetrics = context.taskMetrics().inputMetrics
           existingMetrics.incBytesRead(blockResult.bytes)
-          new InterruptibleIterator[T](context, blockResult.data.asInstanceOf[Iterator[T]]) {
+          
+          // Wrap cached iterator to enqueue dummy UIDs if stage root
+          // This prevents downstream transformations from hitting queue underflow
+          val cachedIter = blockResult.data.asInstanceOf[Iterator[T]]
+          val wrappedIter = if (isStageRoot) {
+            cachedIter.map { elem =>
+              Trace.enqueueUid(Trace.generateUid())
+              elem
+            }
+          } else {
+            cachedIter
+          }
+          
+          new InterruptibleIterator[T](context, wrappedIter) {
             override def next(): T = {
               existingMetrics.incRecordsRead(1)
               delegate.next()
@@ -815,16 +842,22 @@ abstract class RDD[T: ClassTag](
 
       // Implement UID tracking for range sampling operations
       partition.flatMap { value =>
-        val currentUid = Trace.dequeueUid()
-        val sampleCount = sampler.sample()
-
-        if (sampleCount > 0) {
-          // Element selected - preserve original UID
-          Trace.enqueueUid(currentUid)
-          Some(value)
+        if (Trace.isCorrelationBroken) {
+          // No UID tracking - just apply sampling
+          val sampleCount = sampler.sample()
+          if (sampleCount > 0) Some(value) else None
         } else {
-          // Element not selected - UID is discarded (not re-enqueued)
-          None
+          val currentUid = Trace.dequeueUid()
+          val sampleCount = sampler.sample()
+
+          if (sampleCount > 0) {
+            // Element selected - preserve original UID
+            Trace.enqueueUid(currentUid)
+            Some(value)
+          } else {
+            // Element not selected - UID is discarded (not re-enqueued)
+            None
+          }
         }
       }
     }, isOrderSensitive = true, preservesPartitioning = true)
