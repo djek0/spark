@@ -119,6 +119,20 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
 //              logInfo("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
 //              logInfo(s"[EXTRA LOG][TASK RESULT GETTER 2] deserialized result: for task ${tid}")
 //              println(Arrays.toString(deserializedResult.valueBytes.array()).hashCode().toString)
+              
+              // Store hash for IndirectTaskResult as well (for large results)
+              val hashSize: Long = deserializedResult.metricPeaks(deserializedResult.metricPeaks.length-1)
+              deserializedResult.metricPeaks = deserializedResult.metricPeaks.take(deserializedResult.metricPeaks.length-1)
+              val taskInfo = taskSetManager.taskInfos(tid)
+              val task = taskSetManager.tasks(taskInfo.index)
+              task match {
+                case _: ResultTask[_, _] | _: ShuffleMapTask =>
+                  logInfo(s"[INDIRECT] Calling addNewResultTasks for large result (TID $tid)")
+                  TaskResultVerificationManager.addNewResultForTid(tid, hashSize.toString)
+                case _ =>
+                  logDebug(s"[VERIFICATION] Skipping adding result hash for verification task ${task.getClass.getSimpleName} (taskId=$tid)")
+              }
+              
               (deserializedResult, size)
           }
 

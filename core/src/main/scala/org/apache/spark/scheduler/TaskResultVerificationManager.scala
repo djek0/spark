@@ -11,6 +11,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.{TaskContext, TaskContextImpl}
 import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.util.FileFormatUtils
+import org.apache.spark.rdd.UnsafeStageMarkers
 
 
 object TaskResultVerificationManager extends Logging {
@@ -108,7 +109,7 @@ object TaskResultVerificationManager extends Logging {
    * @param executorId Executor ID where task is running
    * @param host Host where task is running
    */
-  def addNewRunningTask(tid: Int, indexStage: (Int, Int), task: Task[_], executorId: String, host: String): Unit = {
+  def addNewRunningTask(tid: Long, indexStage: (Int, Int), task: Task[_], executorId: String, host: String): Unit = {
     if(tidToStageIndexInfo.contains(tid)){
       logDebug(s"Task $tid already registered in verification manager")
       return
@@ -182,12 +183,15 @@ object TaskResultVerificationManager extends Logging {
    * @param stageId The stage ID to clean up
    */
   def cleanupStage(stageId: Int): Unit = {
+    logInfo(s"[CLEANUP] Starting cleanup for stage $stageId")
     // Remove all task ID mappings for this stage
     val tidsToRemove = tidToStageIndexInfo.filter(_._2._1 == stageId).keys.toList
+    logInfo(s"[CLEANUP] Removing ${tidsToRemove.size} task ID mappings for stage $stageId")
     tidsToRemove.foreach(tidToStageIndexInfo.remove)
     
     // Remove all result hashes for this stage
     val stageIndexesToRemove = stageIndexToResultHash.keys.filter(_._1 == stageId).toList
+    logInfo(s"[CLEANUP] Removing ${stageIndexesToRemove.size} result hashes for stage $stageId: ${stageIndexesToRemove.take(10)}")
     stageIndexesToRemove.foreach(stageIndexToResultHash.remove)
     
     // Remove all original tasks for this stage
@@ -228,9 +232,9 @@ object TaskResultVerificationManager extends Logging {
     if(tidToStageIndexInfo.contains(tid)){
       val stageIndex = tidToStageIndexInfo(tid)
       stageIndexToResultHash(stageIndex) = resultHash
-      logDebug(s"Stored result hash for task $tid (stage ${stageIndex._1}, index ${stageIndex._2}): $resultHash")
+      logInfo(s"[HASH STORE] Stored result hash for task $tid (stage ${stageIndex._1}, index ${stageIndex._2}): $resultHash")
     } else {
-      logWarning(s"[!] Task $tid not found in running tasks, cannot store result hash")
+      logWarning(s"[HASH STORE] Task $tid not found in running tasks, cannot store result hash")
     }
   }
 
@@ -872,6 +876,8 @@ object TaskResultVerificationManager extends Logging {
               } else {
                 computeTaskResultHash(driverResult)
               }
+              logInfo(s"[HASH LOOKUP] Looking up hashes for stage $stageId: idx$index1=(${stageId},$index1), idx$index2=(${stageId},$index2)")
+              logInfo(s"[HASH LOOKUP] Current hash map size: ${stageIndexToResultHash.size}, contains idx$index1: ${stageIndexToResultHash.contains((stageId, index1))}, contains idx$index2: ${stageIndexToResultHash.contains((stageId, index2))}")
               val hash1 = stageIndexToResultHash.getOrElse((stageId, index1), "MISSING")
               val hash2 = stageIndexToResultHash.getOrElse((stageId, index2), "MISSING")
 
@@ -964,9 +970,31 @@ object TaskResultVerificationManager extends Logging {
       val finalsPath2 = FileFormatUtils.buildFinalsPath(appName, stageId, index2, partitionId, debugMode)
       
       // Check if finals files exist
-      if (!new java.io.File(finalsPath1).exists() || !new java.io.File(finalsPath2).exists()) {
-        logWarning(s"[MERKLE] Finals files not found, cannot build Merkle trees")
-        return None
+      val file1Exists = new java.io.File(finalsPath1).exists()
+      val file2Exists = new java.io.File(finalsPath2).exists()
+      
+      (file1Exists, file2Exists) match {
+        case (true, true) =>
+          // Both exist - proceed with verification
+          
+        case (true, false) =>
+          // Only replica 1 exists - replica 1 is correct
+          logInfo(s"[FILE CHECK] Only replica 1 file exists - declaring replica 1 correct")
+          logInfo(s"[EARLY VERDICT] Replica 1 (idx$index1) is CORRECT (file exists)")
+          logInfo(s"[EARLY VERDICT] Replica 2 (idx$index2) is BYZANTINE (file missing)")
+          return Some((-1L, index1, index2))
+          
+        case (false, true) =>
+          // Only replica 2 exists - replica 2 is correct
+          logInfo(s"[FILE CHECK] Only replica 2 file exists - declaring replica 2 correct")
+          logInfo(s"[EARLY VERDICT] Replica 2 (idx$index2) is CORRECT (file exists)")
+          logInfo(s"[EARLY VERDICT] Replica 1 (idx$index1) is BYZANTINE (file missing)")
+          return Some((-1L, index2, index1))
+          
+        case (false, false) =>
+          // Neither exists - trigger full-task recomputation
+          logWarning(s"[FILE CHECK] Both replica files missing - cannot build Merkle trees")
+          return None
       }
       
       // Build Merkle trees - either on driver or executors based on configuration
@@ -1042,6 +1070,20 @@ object TaskResultVerificationManager extends Logging {
       
       logInfo(s"[MERKLE] Driver built tree 1: ${tree1.leafCount} leaves, rootHash=${tree1.rootHash}")
       logInfo(s"[MERKLE] Driver built tree 2: ${tree2.leafCount} leaves, rootHash=${tree2.rootHash}")
+      
+      // Check for unsafe stage markers
+      val isUnsafe1 = (tree1.leafCount == 1 && tree1.rootHash == UnsafeStageMarkers.UNSAFE_STAGE_HASH)
+      val isUnsafe2 = (tree2.leafCount == 1 && tree2.rootHash == UnsafeStageMarkers.UNSAFE_STAGE_HASH)
+      
+      if (isUnsafe1 && isUnsafe2) {
+        logInfo(s"[MERKLE] Both replicas are UNSAFE_STAGE - triggering full-task recomputation")
+        return MerkleBuildFailure("Both replicas from unsafe stage - full-task verification required")
+      }
+      
+      if (isUnsafe1 || isUnsafe2) {
+        logWarning(s"[MERKLE] Replica mismatch: unsafe=${if (isUnsafe1) "idx" + index1 else "idx" + index2} - triggering recomputation")
+        return MerkleBuildFailure("Unsafe/safe mismatch - full-task verification required")
+      }
       
       // Return trees - disagreement finding will happen in common code
       BothTreesBuilt(tree1, tree2)
@@ -1139,9 +1181,23 @@ object TaskResultVerificationManager extends Logging {
             logInfo(s"[MERKLE] Tree 1: ${result1.leafCount} leaves, rootHash=${result1.rootHash}, buildTime=${result1.buildTimeMs}ms")
             logInfo(s"[MERKLE] Tree 2: ${result2.leafCount} leaves, rootHash=${result2.rootHash}, buildTime=${result2.buildTimeMs}ms")
             
-            // Check if either tree represents an empty partition
-            val isEmpty1 = (result1.leafCount == 1 && result1.rootHash == 0)
-            val isEmpty2 = (result2.leafCount == 1 && result2.rootHash == 0)
+            // Check if either tree represents an empty partition or unsafe stage
+            val isEmpty1 = (result1.leafCount == 1 && result1.rootHash == UnsafeStageMarkers.EMPTY_PARTITION_HASH)
+            val isEmpty2 = (result2.leafCount == 1 && result2.rootHash == UnsafeStageMarkers.EMPTY_PARTITION_HASH)
+            val isUnsafe1 = (result1.leafCount == 1 && result1.rootHash == UnsafeStageMarkers.UNSAFE_STAGE_HASH)
+            val isUnsafe2 = (result2.leafCount == 1 && result2.rootHash == UnsafeStageMarkers.UNSAFE_STAGE_HASH)
+            
+            // If both are unsafe stages, skip Merkle and do full-task recomputation
+            if (isUnsafe1 && isUnsafe2) {
+              logInfo(s"[MERKLE] Both replicas are UNSAFE_STAGE - triggering full-task recomputation")
+              return MerkleBuildFailure("Both replicas from unsafe stage - full-task verification required")
+            }
+            
+            // If one is unsafe and other isn't, that's suspicious
+            if (isUnsafe1 || isUnsafe2) {
+              logWarning(s"[MERKLE] Replica mismatch: unsafe=${if (isUnsafe1) "idx" + index1 else "idx" + index2} - triggering recomputation")
+              return MerkleBuildFailure("Unsafe/safe mismatch - full-task verification required")
+            }
             
             if (isEmpty1 && isEmpty2) {
               logInfo(s"[MERKLE] Both replicas produced EMPTY results (valid empty partition)")

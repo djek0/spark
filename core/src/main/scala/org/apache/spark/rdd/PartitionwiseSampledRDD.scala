@@ -65,15 +65,15 @@ private[spark] class PartitionwiseSampledRDD[T: ClassTag, U: ClassTag](
     val split = splitIn.asInstanceOf[PartitionwiseSampledRDDPartition]
     val thisSampler = sampler.clone
     thisSampler.setSeed(split.seed)
-    
+
     // Implement UID tracking for sampling operations
     val inputIter = firstParent[T].iterator(split.prev, context)
-    
+
     inputIter.flatMap { value =>
       val currentUid = Trace.dequeueUid()
       val sampleCount = thisSampler.sample()
       println(s"Current UID: $currentUid, Value: $value, Sample Count: $sampleCount")
-      
+
       if (sampleCount > 0) {
         // For Bernoulli sampler: sampleCount = 1 (keep element once)
         // For Poisson sampler: sampleCount = k (keep element k times with replacement)
@@ -87,6 +87,7 @@ private[spark] class PartitionwiseSampledRDD[T: ClassTag, U: ClassTag](
       }
     }
   }
+
 
   override protected def getOutputDeterministicLevel = {
     if (prev.outputDeterministicLevel == DeterministicLevel.UNORDERED) {

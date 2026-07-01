@@ -52,7 +52,7 @@ private[spark] class MapPartitionsRDD[U: ClassTag, T: ClassTag](
 
   override def compute(split: Partition, context: TaskContext): Iterator[U] = {
     val inputIter = firstParent[T].iterator(split, context)
-    
+
     // Handle different transformation categories with UID tracking
     if (isFilterOperation) {
       // Category 1: 1→0/1 (Droppers) - filter operations

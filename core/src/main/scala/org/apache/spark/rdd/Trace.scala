@@ -19,11 +19,25 @@ package org.apache.spark.rdd
 
 import java.io.File
 import java.nio.file.{Files, StandardCopyOption}
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicLong
 import scala.util.Properties.envOrElse
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.util.SafeWriter
+
+/**
+ * Sentinel values for special stage conditions.
+ */
+object UnsafeStageMarkers {
+  // Marker for stages with no safe transformations (e.g., only ShuffledRDD)
+  val UNSAFE_STAGE_UID: Long = -99999L
+  val UNSAFE_STAGE_HASH: Int = Int.MinValue  // -2147483648
+  
+  // Marker for truly empty partitions
+  val EMPTY_PARTITION_UID: Long = -1L
+  val EMPTY_PARTITION_HASH: Int = 0
+}
 
 /**
  * Companion object for UID tracking and logging.
@@ -46,6 +60,12 @@ private[spark] object Trace extends Logging {
   // Stores the last safe iterator encountered during recursive evaluation
   private val backupIteratorTL = new ThreadLocal[Option[Iterator[Any]]] {
     override def initialValue(): Option[Iterator[Any]] = None
+  }
+
+  // Backup queue - snapshot of UID queue when backup iterator is set
+  // This preserves the queue state at the last safe transformation point
+  private val backupQueueTL = new ThreadLocal[ArrayDeque[Long]] {
+    override def initialValue(): ArrayDeque[Long] = new ArrayDeque[Long]()
   }
 
   // Correlation broken flag - once set, UID correlation is permanently lost
@@ -75,10 +95,14 @@ private[spark] object Trace extends Logging {
    * Update the backup iterator if the current iterator is safe.
    * Called from RDD.iterator() when encountering a safe transformation.
    * Only updates if UID correlation hasn't been broken yet.
+   * Also snapshots the current UID queue state for restoration during logging.
    */
   private[rdd] def updateBackupIterator[T](iterator: Iterator[T]): Unit = {
     if (!isCorrelationBroken) {
       backupIteratorTL.set(Some(iterator.asInstanceOf[Iterator[Any]]))
+      // Snapshot the current queue state
+      val backupQueue = new ArrayDeque[Long](q)
+      backupQueueTL.set(backupQueue)
     }
   }
 
@@ -115,6 +139,15 @@ private[spark] object Trace extends Logging {
   }
 
   /**
+   * Restore the UID queue to the backup state.
+   * Called before logging the backup iterator to ensure correct UID correlation.
+   */
+  private[rdd] def restoreBackupQueue(): Unit = {
+    q.clear()
+    backupQueueTL.get().forEach(q.add(_))
+  }
+
+  /**
    * Initialize UID tracking for a new task.
    * Must be called at the beginning of each task.
    */
@@ -122,6 +155,7 @@ private[spark] object Trace extends Logging {
     q.clear()
     ctr.set(0L)
     clearBackupIterator()
+    backupQueueTL.set(new ArrayDeque[Long]())
     correlationBrokenTL.set(false)
   }
 
@@ -149,7 +183,8 @@ private[spark] object Trace extends Logging {
   private[rdd] def generateUid(): Long = ctr.getAndIncrement()
 
   // track the writers so we can commit their logs all at the end of the task
-  private val activeWriters = new java.util.concurrent.ConcurrentHashMap[String, SafeWriter]()
+  // Changed to List to support multiple writers per thread (input + output)
+  private val activeWriters = new java.util.concurrent.ConcurrentHashMap[String, java.util.List[SafeWriter]]()
   
   // Debug mode: set to true for human-readable text files (slower), false for binary (faster)
   private val DEBUG_MODE = envOrElse("DEBUG_MODE", "false").toBoolean
@@ -169,7 +204,15 @@ private[spark] object Trace extends Logging {
     // Always write to .tmp first for atomic commit
     val file = new File(dir, s"spark_inputs_stage${stageId}_idx${taskIndex}_p${partitionId}.tmp")
     val writer = new SafeWriter(file, binary = !DEBUG_MODE)
-    activeWriters.put(Thread.currentThread().getName, writer)
+    
+    // Add writer to the list for this thread
+    val threadName = Thread.currentThread().getName
+    activeWriters.compute(threadName, (_, existing) => {
+      val list = if (existing == null) new java.util.ArrayList[SafeWriter]() else existing
+      list.add(writer)
+      list
+    })
+    
     writer
   }
 
@@ -188,7 +231,15 @@ private[spark] object Trace extends Logging {
     // Always write to .tmp first for atomic commit
     val file = new File(dir, s"spark_finals_stage${stageId}_idx${taskIndex}_p${partitionId}.tmp")
     val writer = new SafeWriter(file, binary = !DEBUG_MODE)
-    activeWriters.put(Thread.currentThread().getName, writer)
+    
+    // Add writer to the list for this thread
+    val threadName = Thread.currentThread().getName
+    activeWriters.compute(threadName, (_, existing) => {
+      val list = if (existing == null) new java.util.ArrayList[SafeWriter]() else existing
+      list.add(writer)
+      list
+    })
+    
     writer
   }
 
@@ -270,18 +321,25 @@ private[spark] object Trace extends Logging {
   }
 
   /**
-   * Commit  all the logs
-   * usefull to commit all the logs from the current active writers
+   * Commit all the logs
+   * Useful to commit all the logs from the current active writers
    * if we are outside of where the writer was created we can still commit the logs
    */
   def commitAllLogs(): Unit = {
     val threadName = Thread.currentThread().getName
-    Option(activeWriters.get(threadName)).foreach { writer =>
+    Option(activeWriters.get(threadName)).foreach { writerList =>
       try {
-        commitLogs(writer)
-      } catch {
-        case e: Exception =>
-          logError(s"Failed to commit log writer for thread $threadName", e)
+        // Commit all writers for this thread
+        val it = writerList.iterator()
+        while (it.hasNext) {
+          val writer = it.next()
+          try {
+            commitLogs(writer)
+          } catch {
+            case e: Exception =>
+              logError(s"Failed to commit log writer for thread $threadName", e)
+          }
+        }
       } finally {
         activeWriters.remove(threadName)
       }

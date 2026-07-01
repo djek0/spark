@@ -607,7 +607,7 @@ private[spark] class TaskSetManager(
       case _: ResultTask[_, _] | _: ShuffleMapTask =>
         val stageIndex = (taskSet.stageId, index)
         logInfo(s"[VERIFICATION REGISTER] Registering taskId=${taskId} with stageIndex=${stageIndex} (array index=${index}), executor=${execId}, host=${host}")
-        TaskResultVerificationManager.addNewRunningTask(taskId.toInt, stageIndex, taskSet.tasks(index), execId, host)
+        TaskResultVerificationManager.addNewRunningTask(taskId, stageIndex, taskSet.tasks(index), execId, host)
       case _ =>
         logDebug(s"[VERIFICATION REGISTER] Skipping registration for verification task ${task.getClass.getSimpleName} (taskId=${taskId})")
     }

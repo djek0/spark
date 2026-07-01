@@ -66,7 +66,13 @@ object MerkleTree extends Logging {
     if (data.isEmpty) {
       // Empty partition is valid - return a special empty node with predictable hash
       logInfo("[MERKLE] Building tree from empty partition - using EmptyNode")
-      return LeafNode(0, -1L)  // Special: hash=0, uid=-1 indicates empty partition
+      return LeafNode(UnsafeStageMarkers.EMPTY_PARTITION_HASH, UnsafeStageMarkers.EMPTY_PARTITION_UID)
+    }
+    
+    // Check for UNSAFE_STAGE marker
+    if (data.length == 1 && data(0)._1 == UnsafeStageMarkers.UNSAFE_STAGE_UID) {
+      logWarning("[MERKLE] Detected UNSAFE_STAGE marker - no safe transformations in stage")
+      return LeafNode(UnsafeStageMarkers.UNSAFE_STAGE_HASH, UnsafeStageMarkers.UNSAFE_STAGE_UID)
     }
     
     val leaves: Array[MerkleNode] = data.map { case (uid, value) =>
