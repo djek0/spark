@@ -277,6 +277,8 @@ abstract class RDD[T: ClassTag](
       // Multi-source transformations (reads from multiple RDDs simultaneously, UID collapse)
       case "CoGroupedRDD" => true
       case "SubtractedRDD" => true
+      // Sampling transformations (non-deterministic - each execution samples different elements)
+      case "PartitionwiseSampledRDD" => true
       // Default: safe for UID tracking within the stage
       case _ => false
     }
@@ -355,26 +357,45 @@ abstract class RDD[T: ClassTag](
       // Update backup iterator if this RDD is safe for UID tracking
       // This happens at every recursion level, not just outermost
       // Only update if correlation hasn't been broken yet
+      // Verification tasks ALSO need to build backup iterators for single-element verification
+      
+      // Check if this is a stage root (same logic as in computeOrReadCheckpoint)
+      val isStageRoot = dependencies.isEmpty ||
+        dependencies.forall(_.isInstanceOf[ShuffleDependency[_, _, _]])
+      
+      logWarning(s"[BACKUP-DEBUG] Stage ${context.stageId} partition ${split.index}: " +
+        s"RDD=${this.getClass.getSimpleName}, isCollapser=$isCollapserRDD, " +
+        s"isStageRoot=$isStageRoot, correlationBroken=${Trace.isCorrelationBroken}")
+      
       if (!Trace.isCorrelationBroken) {
-        val isSafe = !isCollapserRDD && !context.isVerificationTask
+        val isSafe = !isCollapserRDD
+        // Save backup for each safe RDD - the LAST safe RDD wins (ThreadLocal)
         if (isSafe) {
-          logInfo(s"[UID TRACKING] SAFE: Updating backup iterator for stage ${context.stageId}," +
+          logWarning(s"[BACKUP-DEBUG] SAVING backup iterator for stage ${context.stageId}," +
             s" partition ${split.index}, iterator ${it.getClass.getSimpleName}")
           Trace.updateBackupIterator(it)
-        } else {
+        } else if (!isStageRoot) {
           // Mark correlation as permanently broken when encountering a collapser
-          logInfo(s"[UID TRACKING] BROKEN: Marking correlation as permanently broken for stage ${context.stageId}," +
+          // UNLESS this is a stage root (which starts a fresh UID sequence for this stage)
+          logWarning(s"[BACKUP-DEBUG] MARKING BROKEN for stage ${context.stageId}," +
             s" partition ${split.index}, iterator ${it.getClass.getSimpleName}")
           Trace.markCorrelationBroken()
+        } else {
+          // Stage root collapser: don't mark broken (it starts fresh UID sequence for this stage)
+          logWarning(s"[BACKUP-DEBUG] SKIPPING mark broken for stage root ${this.getClass.getSimpleName} " +
+            s"at stage ${context.stageId}, partition ${split.index}")
         }
+      } else {
+        logWarning(s"[BACKUP-DEBUG] SKIPPING (already broken) for stage ${context.stageId}," +
+          s" partition ${split.index}")
       } 
 
       // Get app name safely from SparkEnv
       val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
-      println("appName: " + appName)
+      // println("appName: " + appName)
 
-      if (isOutermost && !context.isVerificationTask) {
-        if (!Trace.isCorrelationBroken) {
+      if (isOutermost) {
+        if (!Trace.isCorrelationBroken && !context.isVerificationTask) {
           // Case A: All transformations safe - log with outermost iterator
           // No collapser encountered, queue is in correct state
           val outWriter = Trace.createOutputWriter(
@@ -406,13 +427,42 @@ abstract class RDD[T: ClassTag](
         } else {
           // Case B: Correlation broken - use backup iterator or UNSAFE_STAGE
           val backupIt = Trace.getBackupIterator[T]()
+          logWarning(s"[BACKUP-DEBUG] At outermost for stage ${context.stageId} partition ${split.index}: " +
+            s"backupIt=${if (backupIt.isDefined) "FOUND" else "NONE"}, " +
+            s"isVerificationTask=${context.isVerificationTask}")
           
           backupIt match {
-            case Some(backupIt) =>
-              // Restore backup queue to ensure correct UID correlation
+            case Some(backupIt) if context.isVerificationTask =>
+              // Verification task with backup iterator available
               Trace.restoreBackupQueue()
               
-              // Use backup iterator for logging
+              context match {
+                case ctx: TaskContextImpl if ctx.targetElementId.isDefined =>
+                  // Single-element verification: value already captured at stage root
+                  // Just flow the iterator through, updating the captured value with final transformation
+                  val targetId = ctx.targetElementId.get
+                  logDebug(s"[VERIFICATION] Using backup iterator for target UID $targetId")
+                  
+                  // Use MAP to let the single element flow through and update captured value
+                  // No need to check UID - we know there's only 1 element (from flatMap filtering)
+                  backupIt.map { elem =>
+                    val uid = Trace.dequeueUid()  // Dequeue UID (there's only 1)
+                    // No need to re-enqueue - this is outermost (last RDD)
+                    logWarning(s"[VERIFICATION] Updated captured value at outermost for UID $uid: $elem (type=${elem.getClass.getSimpleName})")
+                    ctx.setCapturedBackupValue(elem)  // Update with final transformed value
+                    elem  // Return element so iterator flows through
+                  }
+                  
+                case _ =>
+                  // Full-task verification: just return iterator without logging
+                  logDebug(s"[VERIFICATION] Full-task verification, returning iterator without logging")
+                  it
+              }
+            
+            case Some(backupIt) =>
+              // Normal task with backup iterator: use it for logging
+              Trace.restoreBackupQueue()
+              
               val outWriter = Trace.createOutputWriter(
                 stageId = context.stageId,
                 partitionId = split.index,
@@ -446,8 +496,13 @@ abstract class RDD[T: ClassTag](
               // Return original iterator for actual computation
               it
 
+            case None if context.isVerificationTask =>
+              // Verification task with no backup iterator: just return iterator
+              logDebug(s"[VERIFICATION] No backup iterator for verification task, returning iterator")
+              it
+
             case None =>
-              // No safe iterator exists - write UNSAFE_STAGE marker
+              // Normal task with no backup iterator: write UNSAFE_STAGE marker
               logWarning(s"[BACKUP ITERATOR] No safe iterator found for stage ${context.stageId}, partition ${split.index} - writing UNSAFE_STAGE marker")
               val outWriter = Trace.createOutputWriter(
                 stageId = context.stageId,
@@ -510,26 +565,37 @@ abstract class RDD[T: ClassTag](
       val isStageRoot = dependencies.isEmpty ||
         dependencies.forall(_.isInstanceOf[ShuffleDependency[_, _, _]])
 
+      logWarning(s"[INIT-DEBUG] Stage ${context.stageId} partition ${split.index}: " +
+        s"RDD=${this.getClass.getSimpleName}, isStageRoot=$isStageRoot, " +
+        s"dependencies=${dependencies.map(_.getClass.getSimpleName).mkString(", ")}")
+
       if (isStageRoot) {
         // Initialize UID tracking for this stage
+        logWarning(s"[INIT-DEBUG] CALLING initForTask() for ${this.getClass.getSimpleName} " +
+          s"at stage ${context.stageId} partition ${split.index}")
         Trace.initForTask()
 
         // Check if this is a verification task
         context match {
-          case ctx: TaskContextImpl if ctx.isVerificationTask && ctx.targetElementId.isDefined =>
+          case ctx: TaskContextImpl if ctx.targetElementId.isDefined =>
             val isVerificationTask = ctx.isVerificationTask
             val targetId = ctx.targetElementId.get
-            logInfo(s"[SINGLE-ITERATOR] got in $isVerificationTask with element id $targetId ")
+            logDebug(s"[SINGLE-ITERATOR] got in $isVerificationTask with element id $targetId ")
             // Verification mode: traverse iterator and filter single element by UID
 
             
+            // Filter to ONLY the target element - creates iterator with 1 element
+            // This avoids full-task recomputation (only processes target UID)
             baseIter.flatMap { value =>
               val currentUid = Trace.generateUid()
-              Trace.enqueueUid(currentUid)  // Enqueue to maintain consistency with normal tasks
               if (currentUid == targetId) {
-                Some(value)
+                Trace.enqueueUid(currentUid)  // Only enqueue the UID we're returning
+                logWarning(s"[VERIFICATION] Captured value from stage root for UID $currentUid: $value")
+                ctx.setCapturedBackupValue(value)
+                Some(value)  // Return ONLY this element
               } else {
-                None
+                // Don't enqueue UIDs for elements we're not returning
+                None  // Skip other elements
               }
             }
           

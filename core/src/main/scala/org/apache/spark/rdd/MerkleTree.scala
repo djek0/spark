@@ -181,19 +181,33 @@ object MerkleTree extends Logging {
       dis.close()
     }
     
-    buffer.toArray.sortBy(_._1)
+    val data = buffer.toArray.sortBy(_._1)
+    
+    // Debug: Log first few entries
+    if (data.length > 0) {
+      logWarning(s"[MERKLE READ] ${file.getName}: ${data.length} entries, first entry UID 0: ${data.find(_._1 == 0).map(_._2).getOrElse("N/A")}")
+    }
+    
+    data
   }
   
   private def readTextFinalsFile(file: File): Array[(Long, String)] = {
     val source = scala.io.Source.fromFile(file)
     try {
-      source.getLines()
+      val data = source.getLines()
         .map { line =>
           val parts = line.split("\\|", 2)
           (parts(0).toLong, parts(1))
         }
         .toArray
         .sortBy(_._1)
+      
+      // Debug: Log first few entries
+      if (data.length > 0) {
+        logWarning(s"[MERKLE READ] ${file.getName}: ${data.length} entries, first entry UID 0: ${data.find(_._1 == 0).map(_._2).getOrElse("N/A")}")
+      }
+      
+      data
     } finally {
       source.close()
     }

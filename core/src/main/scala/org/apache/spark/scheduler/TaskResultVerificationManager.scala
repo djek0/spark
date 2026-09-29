@@ -40,6 +40,8 @@ object TaskResultVerificationManager extends Logging {
   private val merkleTreeBuildLock = new Object()
   // Track partitions where consensus was found (hashes match)
   private val consensusFound = new scala.collection.mutable.HashSet[(Int, Int)]()
+  // Track partitions that have retried with full-task verification after NEITHER_MATCH
+  private val stagePartitionFullTaskRetry = new scala.collection.mutable.HashSet[(Int, Int)]()
 
   // Sealed trait for Merkle tree build outcomes
   private sealed trait MerkleBuildOutcome
@@ -60,6 +62,10 @@ object TaskResultVerificationManager extends Logging {
   private val merkleTreeBuildTimeoutMs = envOrElse("MERKLE_BUILD_TIMEOUT_MS", "10000").toInt
   // Configuration: Build Merkle trees on driver instead of executors (for testing/debugging)
   private val buildMerkleTreesOnDriver = envOrElse("MERKLE_BUILD_ON_DRIVER", "false").toBoolean
+  // Configuration: Restrict verification to trusted executor pool (e.g., SGX nodes, on-prem servers)
+  private val trustedVerifiersOnly = envOrElse("TRUSTED_VERIFIERS_ONLY", "false").toBoolean
+  // Configuration: Modulo divisor for trusted pool (default 2 = executors 0,2,4,6... are trusted)
+  private val trustedVerifierModulo = envOrElse("TRUSTED_VERIFIER_MODULO", "2").toInt
 
   logInfo(s"[CONFIG] Executor verification enabled: $useExecutorVerification")
   logInfo(s"[CONFIG] Merkle tree verification enabled: $useMerkleVerification")
@@ -67,6 +73,14 @@ object TaskResultVerificationManager extends Logging {
   logInfo(s"[CONFIG] Verification timeout: ${verificationTimeoutMs}ms")
   logInfo(s"[CONFIG] Merkle tree build timeout: ${merkleTreeBuildTimeoutMs}ms")
   logInfo(s"[CONFIG] Build Merkle trees on driver: $buildMerkleTreesOnDriver")
+  logInfo(s"[CONFIG] Trusted verifiers only: $trustedVerifiersOnly")
+  if (trustedVerifiersOnly) {
+    logInfo(s"[CONFIG] Trusted verifier modulo: $trustedVerifierModulo (executor IDs divisible by $trustedVerifierModulo)")
+  }
+  
+  // NOTE: Accumulator warnings ("Attempted to access garbage collected accumulator") are EXPECTED
+  // They occur when verification tasks try to access accumulators from original tasks after GC
+  // This is harmless and does not affect correctness - verification uses RDD recomputation, not accumulators
 
   /**
    * Detects if a stage involves shuffle operations (reads OR writes shuffle).
@@ -178,12 +192,46 @@ object TaskResultVerificationManager extends Logging {
   }
 
   /**
+   * Post a verification verdict and retry stage cleanup.
+   * After posting a verdict, we check if the stage can now be cleaned up.
+   */
+  private def postVerdictAndRetryCleanup(
+      stageId: Int,
+      index1: Int,
+      index2: Int,
+      partitionId: Int,
+      verdict: String,
+      verifierResult: Option[Any]): Unit = {
+    // Post the verdict
+    dagScheduler.eventProcessLoop.post(
+      VerificationVerdictEvent(stageId, index1, index2, partitionId, verdict, verifierResult))
+    
+    // Retry cleanup in case this was the last pending verification for the stage
+    logInfo(s"[CLEANUP] Verdict posted for stage $stageId partition $partitionId - retrying stage cleanup")
+    cleanupStage(stageId)
+  }
+
+  /**
    * Clean up all data structures for a completed stage to prevent memory leaks.
    * Should be called when a stage completes (success or failure).
    * @param stageId The stage ID to clean up
    */
   def cleanupStage(stageId: Int): Unit = {
-    logInfo(s"[CLEANUP] Starting cleanup for stage $stageId")
+    // Check if any verification is still pending for this stage
+    val hasPendingVerification = verificationInProgress.exists(_._1 == stageId)
+    val hasConsensusIssues = stageIndexToResultHash.keys.filter(_._1 == stageId).exists { case (sid, idx) =>
+      val partitionId = idx / 2  // Convert taskIndex to partitionId
+      !consensusFound.contains((sid, partitionId))
+    }
+    
+    if (hasPendingVerification || hasConsensusIssues) {
+      logWarning(s"[CLEANUP] Stage $stageId has pending verification or consensus issues - DELAYING cleanup")
+      logWarning(s"[CLEANUP] Pending verification: $hasPendingVerification, Consensus issues: $hasConsensusIssues")
+      logWarning(s"[CLEANUP] Task data will be retained for verification (prevents ShuffleMapTask detection failure)")
+      return  // Don't cleanup yet!
+    }
+    
+    logInfo(s"[CLEANUP] Starting cleanup for stage $stageId (no pending verification)")
     // Remove all task ID mappings for this stage
     val tidsToRemove = tidToStageIndexInfo.filter(_._2._1 == stageId).keys.toList
     logInfo(s"[CLEANUP] Removing ${tidsToRemove.size} task ID mappings for stage $stageId")
@@ -234,7 +282,7 @@ object TaskResultVerificationManager extends Logging {
       stageIndexToResultHash(stageIndex) = resultHash
       logInfo(s"[HASH STORE] Stored result hash for task $tid (stage ${stageIndex._1}, index ${stageIndex._2}): $resultHash")
     } else {
-      logWarning(s"[HASH STORE] Task $tid not found in running tasks, cannot store result hash")
+      logInfo(s"[HASH STORE] Task $tid not found in running tasks, cannot store result hash")
     }
   }
 
@@ -269,8 +317,8 @@ object TaskResultVerificationManager extends Logging {
       while (!merkleTreeBuildResults.contains(key)) {
         val remaining = deadline - System.currentTimeMillis()
         if (remaining <= 0) {
-          logWarning(s"[MERKLE BUILD] Timeout waiting for result: stage $stageId, idx $taskIndex, partition $partitionId (${timeoutMs}ms)")
-          logWarning(s"[MERKLE BUILD] Executor may be Byzantine (non-responsive) or overloaded")
+          logInfo(s"[MERKLE BUILD] Timeout waiting for result: stage $stageId, idx $taskIndex, partition $partitionId (${timeoutMs}ms)")
+          logInfo(s"[MERKLE BUILD] Executor may be Byzantine (non-responsive) or overloaded")
           return None
         }
         merkleTreeBuildLock.wait(remaining)
@@ -300,12 +348,17 @@ object TaskResultVerificationManager extends Logging {
           // Both replicas completed - check consensus
           if (!verificationInProgress.contains(partitionKey)) {
             verificationInProgress += partitionKey
+            
             if(stageIndexToResultHash(stageIndex)==stageIndexToResultHash((stageId,partnerIndex))){
+              // Normal mode: hashes match - consensus found
               logInfo(s"[+] CONSENSUS: Valid result for stage $stageId, partition $partitionId (indexes ${if (index % 2 == 0) s"$index, $partnerIndex" else s"$partnerIndex, $index"})")
               consensusFound.add((stageId, partitionId))
               logInfo(s"[CONSENSUS FLAG] Set consensus flag for stage $stageId, partition $partitionId")
+              // Remove from verificationInProgress since no verification needed (consensus reached)
+              verificationInProgress.remove(partitionKey)
               cleanupPartitionTasks(stageId, index, partnerIndex)
             } else {
+              // Hashes differ - verification needed
               logDebug(s"[CONSENSUS] No consensus for partition $partitionId - hashes differ, will need verification")
             }
           }
@@ -368,7 +421,7 @@ object TaskResultVerificationManager extends Logging {
         logDebug(s"[*] No result hash stored yet for task $tid")
       }
     } else {
-      logWarning(s"[!] Task $tid not found in running tasks during verification")
+      logInfo(s"[!] Task $tid not found in running tasks during verification")
     }
   }
 
@@ -390,15 +443,25 @@ object TaskResultVerificationManager extends Logging {
     
     logInfo(s"[VERIFICATION] Dispatching: EXEC_VERIFICATION=$useExecutorVerification, MERKLE_VERIFICATION=$useMerkleVerification")
     
-    // Check if stage involves shuffle operations (driver cannot execute such tasks)
+    // Check if stage READS from shuffle (driver cannot execute such tasks due to null taskMemoryManager)
     val involvesShuffleOps = stageReadsFromShuffle(stageId)
+    
+    // Note: ShuffleMapTask (shuffle-WRITE stages) are handled separately:
+    // - They might have hidden collapser transformations (e.g., sortByKey sampling)
+    // - Merkle verification is skipped for them (see lines 474-478 and 717-720)
+    // - Full-task verification is used instead
 
-    // Auto-switch to executor verification if driver verification was requested but stage involves shuffle
+    // Auto-switch to executor verification if driver verification was requested but stage READS from shuffle
     if (involvesShuffleOps && !useExecutorVerification) {
-      logWarning(s"[DISPATCH] Stage $stageId involves shuffle operations - driver verification NOT supported")
-      logWarning(s"[DISPATCH] Reason: Driver TaskContext has taskMemoryManager=null, causing NullPointerException during shuffle read/write")
+      logWarning(s"[DISPATCH] Stage $stageId reads from shuffle - driver verification NOT supported")
+      logWarning(s"[DISPATCH] Reason: Driver TaskContext has taskMemoryManager=null, causing NullPointerException during shuffle read")
       logWarning(s"[DISPATCH] Auto-switching to THIRD EXECUTOR verification for safety")
       logWarning(s"[DISPATCH] To avoid this warning, set EXEC_VERIFICATION=true for stages with shuffle operations")
+      // Cancel the driver timeout timer that was already started (executor verification uses different timeout mechanism)
+      val cancelled = dagScheduler.cancelVerificationTimeout(stageId, partitionId)
+      if (cancelled) {
+        logInfo(s"[DISPATCH] Cancelled driver verification timeout after auto-switch to executor mode")
+      }
       verifyOnThirdExecutor(stageId, index1, index2, partitionId, taskScheduler)
     } else if (useExecutorVerification) {
       verifyOnThirdExecutor(stageId, index1, index2, partitionId, taskScheduler)
@@ -436,26 +499,39 @@ object TaskResultVerificationManager extends Logging {
     logInfo(s"[THIRD-EXECUTOR] Excluded executors: $excludedExecutors")
 
     // Get the task object (only original tasks, not verification tasks)
+    logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: Looking up task for indexes ($index1, $index2)")
     val taskOpt = stageIndexToOriginalTask.get((stageId, index1))
       .orElse(stageIndexToOriginalTask.get((stageId, index2)))
+    logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: Task found = ${taskOpt.isDefined}")
 
     taskOpt match {
       case None =>
-        logError(s"[X] Task not found, falling back to driver")
+        logError(s"[X] DISPATCH-DEBUG: Task not found for stage $stageId partition $partitionId, falling back to driver")
+        logError(s"[X] DISPATCH-DEBUG: stageIndexToOriginalTask keys for stage $stageId: ${stageIndexToOriginalTask.keys.filter(_._1 == stageId).take(5).toList}")
+        // Restart timeout for driver verification (mark as last resort and restart timer)
+        dagScheduler.restartTimeoutForDriverVerification(stageId, partitionId)
         verifyOnDriver(stageId, index1, index2, partitionId, taskScheduler)
 
       case Some(task) =>
         try {
-          // ShuffleMapTask: Disable Merkle verification - use full-task mode only
-          // Merkle verification requires individual elements, but ShuffleMapTask produces MapStatus (not elements)
-          val isShuffleMapTask = task.isInstanceOf[ShuffleMapTask]
-          val useMerkleForThisTask = useMerkleVerification && !isShuffleMapTask
+          // Determine verification strategy based on stage position:
+          // - Final stages: Use Merkle (safe, deterministic transformations only)
+          // - Intermediate stages: Use full-task (may contain pseudo-deterministic ops like seeded sampling)
+          val isFinalStage = dagScheduler.isFinalStage(stageId)
+          val shouldUseMerkle = useMerkleVerification && isFinalStage
           
-          if (isShuffleMapTask && useMerkleVerification) {
-            logInfo(s"[VERIFICATION] ShuffleMapTask detected - disabling Merkle verification, using full-task mode")
+          logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: Task type = ${task.getClass.getSimpleName}")
+          logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: isFinalStage = $isFinalStage")
+          logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: useMerkleVerification = $useMerkleVerification")
+          logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: shouldUseMerkle = $shouldUseMerkle")
+          
+          if (!isFinalStage && useMerkleVerification) {
+            logInfo(s"[VERIFICATION] Stage $stageId is intermediate - using FULL-TASK verification")
           }
           
-          if (useMerkleForThisTask) {
+          if (shouldUseMerkle) {
+            logInfo(s"[VERIFICATION] Stage $stageId is final - using MERKLE verification")
+            logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: ✓ Proceeding with MERKLE verification")
             // Step 1: Build Merkle trees and find disagreeing UID + per-tree leaf hashes
             val disagreement = buildMerkleTreesAndFindDisagreement(stageId, index1, index2, partitionId, taskScheduler)
 
@@ -467,8 +543,8 @@ object TaskResultVerificationManager extends Logging {
                 logInfo(s"[THIRD-EXECUTOR] Replica idx$byzantineIdx is BYZANTINE (timeout)")
                 // Determine verdict based on which index is correct
                 val verdict = if (correctIdx == index1) "REPLICA_1_CORRECT" else "REPLICA_2_CORRECT"
-                dagScheduler.eventProcessLoop.post(
-                  VerificationVerdictEvent(stageId, index1, index2, partitionId, verdict, None))                // Verification complete - no need to submit to third executor
+                postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, verdict, None)
+                // Verification complete - no need to submit to third executor
 
               case Some((uid, leafHash1, leafHash2)) if uid == -2L =>
                 // UID mismatch: potential swap attack detected
@@ -488,11 +564,12 @@ object TaskResultVerificationManager extends Logging {
                 submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler, Some(uid), Some((leafHash1, leafHash2)))
 
               case None =>
-                logWarning(s"[THIRD-EXECUTOR] Merkle comparison found no disagreement, falling back to full task")
+                logWarning(s"[THIRD-EXECUTOR] Merkle comparison found no disagreement OR both replicas are UNSAFE_STAGE, falling back to full task")
                 submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
             }
           } else {
             // Full task verification on third executor
+            logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: ✓ Using FULL-TASK verification (isFinalStage=$isFinalStage)")
             submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
             logInfo(s"[THIRD-EXECUTOR] Full task verification submitted, will process result when complete")
           }
@@ -582,6 +659,7 @@ object TaskResultVerificationManager extends Logging {
     pendingVerifications(partitionKey) = (index1, index2)
 
     logInfo(s"[THIRD-EXECUTOR] Submitting verification TaskSet for stage ${task.stageId}, partition ${task.partitionId}")
+    logWarning(s"[TASK ID CONSUMPTION] Verification TaskSet will consume task IDs when scheduled (1 task for partition ${task.partitionId})")
 
     // Submit to scheduler (non-blocking)
     taskScheduler.submitTasks(verificationTaskSet)
@@ -631,19 +709,34 @@ object TaskResultVerificationManager extends Logging {
         // Handle verdict
         verdict.verdict match {
           case "NEITHER_MATCH" =>
-            // Third executor differs from both - fall back to driver verification
-            logWarning(s"[THIRD-EXECUTOR] NEITHER_MATCH - falling back to driver verification")
-            // Cancel existing timeout and restart with longer duration for driver verification
-            dagScheduler.restartTimeoutForDriverVerification(stageId, partitionId)
-            executeOnDriver(stageId, index1, index2, partitionId, None, None)
-            fallbackToDriver = true  // Keep task references for driver recomputation
+            // Third executor differs from both - this might be:
+            // 1. Single-element verification on aggregation stage (e.g., sortByKey sampling)
+            // 2. Actual Byzantine fault in verifier
+            // Try full-task verification before falling back to driver
+            val wasFullTask = stagePartitionFullTaskRetry.contains((stageId, partitionId))
+            if (!wasFullTask) {
+              logWarning(s"[THIRD-EXECUTOR] NEITHER_MATCH - might be aggregation stage, retrying with full-task verification")
+              stagePartitionFullTaskRetry.add((stageId, partitionId))
+              // Resubmit as full-task verification
+              stageIndexToOriginalTask.get((stageId, index1))
+                .orElse(stageIndexToOriginalTask.get((stageId, index2)))
+                .foreach { task =>
+                  val (executor1, _) = stageIndexToExecutor.getOrElse((stageId, index1), ("unknown", "unknown"))
+                  val (executor2, _) = stageIndexToExecutor.getOrElse((stageId, index2), ("unknown", "unknown"))
+                  submitVerificationTaskToExecutor(task, index1, index2, Set(executor1, executor2), dagScheduler.taskScheduler)
+                }
+              fallbackToDriver = true  // Keep task references in case full-task also fails
+            } else {
+              // Full-task verification also failed - fall back to driver
+              logWarning(s"[THIRD-EXECUTOR] NEITHER_MATCH on full-task verification - falling back to driver")
+              dagScheduler.restartTimeoutForDriverVerification(stageId, partitionId)
+              executeOnDriver(stageId, index1, index2, partitionId, None, None)
+              fallbackToDriver = true
+            }
 
           case _ =>
             // Report verdict to DAGScheduler (REPLICA_1_CORRECT, REPLICA_2_CORRECT, BOTH_MATCH)
-            dagScheduler.eventProcessLoop.post(
-              VerificationVerdictEvent(stageId, index1, index2, partitionId,
-                verdict.verdict,
-                verifierResult = None))
+            postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, verdict.verdict, None)
         }
 
       case _ =>
@@ -683,17 +776,30 @@ object TaskResultVerificationManager extends Logging {
 
     logInfo(s"[DRIVER] Starting verification for partition $partitionId (merkle=$useMerkleVerification)")
 
-    // Check if this is a ShuffleMapTask - disable Merkle if so
+    // Determine verification strategy
     val taskOpt = stageIndexToOriginalTask.get((stageId, index1))
       .orElse(stageIndexToOriginalTask.get((stageId, index2)))
     val isShuffleMapTask = taskOpt.exists(_.isInstanceOf[ShuffleMapTask])
-    val useMerkleForThisTask = useMerkleVerification && !isShuffleMapTask
+    val readsFromShuffle = stageReadsFromShuffle(stageId)
+    val isFinalStage = dagScheduler.isFinalStage(stageId)
+    val driverCanExecute = !isShuffleMapTask && !readsFromShuffle
+    val shouldUseMerkle = useMerkleVerification && isFinalStage && driverCanExecute
     
-    if (isShuffleMapTask && useMerkleVerification) {
-      logInfo(s"[DRIVER] ShuffleMapTask detected - disabling Merkle verification, using full-task mode")
+    logDebug(s"[DRIVER] Stage $stageId partition $partitionId: isFinalStage = $isFinalStage")
+    logDebug(s"[DRIVER] Stage $stageId partition $partitionId: isShuffleMapTask = $isShuffleMapTask")
+    logDebug(s"[DRIVER] Stage $stageId partition $partitionId: readsFromShuffle = $readsFromShuffle")
+    logDebug(s"[DRIVER] Stage $stageId partition $partitionId: driverCanExecute = $driverCanExecute")
+    logDebug(s"[DRIVER] Stage $stageId partition $partitionId: shouldUseMerkle = $shouldUseMerkle")
+    
+    if (!isFinalStage && useMerkleVerification) {
+      logInfo(s"[DRIVER] Stage $stageId is intermediate - using FULL-TASK verification")
+    }
+    if (!driverCanExecute) {
+      logInfo(s"[DRIVER] Stage $stageId involves shuffle operations - delegating to executor")
     }
 
-    if (useMerkleForThisTask) {
+    if (shouldUseMerkle) {
+      logInfo(s"[DRIVER] Stage $stageId is final - using MERKLE verification")
       // Build Merkle trees and find disagreeing UID + per-tree leaf hashes
       val disagreement = buildMerkleTreesAndFindDisagreement(stageId, index1, index2, partitionId, taskScheduler)
 
@@ -705,34 +811,61 @@ object TaskResultVerificationManager extends Logging {
           logInfo(s"[DRIVER] Replica idx$byzantineIdx is BYZANTINE (timeout)")
           // Determine verdict based on which index is correct
           val verdict = if (correctIdx == index1) "REPLICA_1_CORRECT" else "REPLICA_2_CORRECT"
-          dagScheduler.eventProcessLoop.post(
-            VerificationVerdictEvent(stageId, index1, index2, partitionId, verdict, None))
+          postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, verdict, None)
           // Verification complete - no need to recompute
 
         case Some((uid, leafHash1, leafHash2)) if uid == -2L =>
           // UID mismatch: potential swap attack detected
           logWarning(s"[DRIVER] UID mismatch detected at disagreement point - potential swap attack")
           logWarning(s"[DRIVER] Falling back to full task recomputation for security")
-          executeOnDriver(stageId, index1, index2, partitionId, None, None)
+          if (!driverCanExecute) {
+            logWarning(s"[DRIVER] Driver cannot execute stage - switching to executor full-task verification")
+            taskOpt.foreach { task =>
+              val (executor1, _) = stageIndexToExecutor.getOrElse((stageId, index1), ("unknown", "unknown"))
+              val (executor2, _) = stageIndexToExecutor.getOrElse((stageId, index2), ("unknown", "unknown"))
+              submitVerificationTaskToExecutor(task, index1, index2, Set(executor1, executor2), taskScheduler)
+            }
+          } else {
+            executeOnDriver(stageId, index1, index2, partitionId, None, None)
+          }
 
         case Some((uid, leafCount1, leafCount2)) if uid == -3L =>
           // Size mismatch: one empty, one non-empty partition
           logWarning(s"[DRIVER] Size mismatch detected (empty vs non-empty partition)")
           logWarning(s"[DRIVER] Replica 1: $leafCount1 leaves, Replica 2: $leafCount2 leaves")
           logWarning(s"[DRIVER] Cannot use Merkle tree - falling back to full task recomputation")
-          executeOnDriver(stageId, index1, index2, partitionId, None, None)
+          if (!driverCanExecute) {
+            logWarning(s"[DRIVER] Driver cannot execute stage - switching to executor full-task verification")
+            taskOpt.foreach { task =>
+              val (executor1, _) = stageIndexToExecutor.getOrElse((stageId, index1), ("unknown", "unknown"))
+              val (executor2, _) = stageIndexToExecutor.getOrElse((stageId, index2), ("unknown", "unknown"))
+              submitVerificationTaskToExecutor(task, index1, index2, Set(executor1, executor2), taskScheduler)
+            }
+          } else {
+            executeOnDriver(stageId, index1, index2, partitionId, None, None)
+          }
 
         case Some((uid, leafHash1, leafHash2)) =>
           logInfo(s"[DRIVER] Found disagreement at UID $uid, recomputing single element")
           executeOnDriver(stageId, index1, index2, partitionId, Some(uid), Some((leafHash1, leafHash2)))
 
         case None =>
-          logWarning(s"[DRIVER] Merkle comparison found no disagreement, falling back to full task")
+          logWarning(s"[DRIVER] Merkle comparison found no disagreement OR both replicas are UNSAFE_STAGE, falling back to full task")
           executeOnDriver(stageId, index1, index2, partitionId, None, None)
       }
     } else {
-      // Full task recomputation on driver
-      executeOnDriver(stageId, index1, index2, partitionId, None, None)
+      // Full task recomputation (MERKLE_VERIFICATION=false or NOT final stage or driver cannot execute)
+      if (!driverCanExecute) {
+        logWarning(s"[DRIVER] Driver cannot execute stage $stageId - delegating to executor full-task verification")
+        logWarning(s"[DRIVER] Switching to executor for full-task verification")
+        taskOpt.foreach { task =>
+          val (executor1, _) = stageIndexToExecutor.getOrElse((stageId, index1), ("unknown", "unknown"))
+          val (executor2, _) = stageIndexToExecutor.getOrElse((stageId, index2), ("unknown", "unknown"))
+          submitVerificationTaskToExecutor(task, index1, index2, Set(executor1, executor2), taskScheduler)
+        }
+      } else {
+        executeOnDriver(stageId, index1, index2, partitionId, None, None)
+      }
     }
   }
 
@@ -796,6 +929,9 @@ object TaskResultVerificationManager extends Logging {
           // Set the context
           TaskContext.setTaskContext(driverTaskContext)
 
+          // Start timer for driver task execution
+          val driverTaskStartTime = System.nanoTime()
+
           // Run the task on driver
           val driverResult = task match {
             case rt: ResultTask[_, _] =>
@@ -807,21 +943,39 @@ object TaskResultVerificationManager extends Logging {
               return
           }
 
+          // Log driver task execution time
+          val driverTaskTime = (System.nanoTime() - driverTaskStartTime) / 1e9
+          val perfLabel = if (elementId.isDefined) "PERF-MERKLE-ELEMENT-DRIVER" else "PERF-FULLTASK-DRIVER"
+          logWarning(s"[$perfLabel] Stage $stageId partition $partitionId: ${driverTaskTime}s")
+
           // Choose comparison strategy based on whether we have Merkle leaf hashes
           (elementId, merkleLeafHashes) match {
             case (Some(uid), Some((leafHash1, leafHash2))) =>
               // MERKLE MODE: Extract the single element from driver result
-              // The RDD already filtered to UID via targetElementId, so result contains only that element
-              val elementAtUid = driverResult match {
-                case arr: Array[_] if arr.length > 0 => arr(0)  // Extract first (only) element
-                case other => other
+              
+              // Check if we captured the backup iterator value (for tasks with unsafe transformations)
+              val elementAtUid = driverTaskContext match {
+                case ctx: TaskContextImpl if ctx.getCapturedBackupValue.isDefined =>
+                  logInfo(s"[DRIVER RECOMPUTE] Using captured backup value instead of final result")
+                  ctx.getCapturedBackupValue.get
+                case _ =>
+                  // Fallback: The RDD already filtered to UID via targetElementId
+                  driverResult match {
+                    case arr: Array[_] if arr.length > 0 => arr(0)  // Extract first (only) element
+                    case other => other
+                  }
               }
 
-              // Format it the same way SafeWriter does
-              val driverValue = elementAtUid match {
+              // Helper function to format values with proper array handling (same as SafeWriter.writeEntry)
+              def formatValueWithArrays(value: Any): String = value match {
                 case arr: Array[_] => arr.mkString("[", ",", "]")
+                case prod: Product => 
+                  // Handle tuples and case classes - recursively format nested arrays
+                  prod.productIterator.map(formatValueWithArrays).mkString("(", ",", ")")
                 case other => other.toString
               }
+              
+              val driverValue = formatValueWithArrays(elementAtUid)
               val driverLeafHash = driverValue.hashCode
 
               logInfo(s"[DRIVER RECOMPUTE] Merkle single-element comparison for UID $uid:")
@@ -831,25 +985,21 @@ object TaskResultVerificationManager extends Logging {
 
               (driverLeafHash == leafHash1, driverLeafHash == leafHash2) match {
                 case (true, false) =>
-                  logInfo(s"[VERDICT] Replica 1 (idx$index1) is CORRECT, Replica 2 (idx$index2) is BYZANTINE")
-                  dagScheduler.eventProcessLoop.post(
-                    VerificationVerdictEvent(stageId, index1, index2, partitionId, "REPLICA_1_CORRECT", Some(driverResult)))
+                  logWarning(s"[VERDICT] Replica 1 (idx$index1) is CORRECT, Replica 2 (idx$index2) is BYZANTINE")
+                  postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, "REPLICA_1_CORRECT", Some(driverResult))
 
                 case (false, true) =>
-                  logInfo(s"[VERDICT] Replica 2 (idx$index2) is CORRECT, Replica 1 (idx$index1) is BYZANTINE")
-                  dagScheduler.eventProcessLoop.post(
-                    VerificationVerdictEvent(stageId, index1, index2, partitionId, "REPLICA_2_CORRECT", Some(driverResult)))
+                  logWarning(s"[VERDICT] Replica 2 (idx$index2) is CORRECT, Replica 1 (idx$index1) is BYZANTINE")
+                  postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, "REPLICA_2_CORRECT", Some(driverResult))
 
                 case (true, true) =>
                   logWarning(s"[?] UNEXPECTED: Both replicas match driver leaf hash - possible hash collision")
-                  dagScheduler.eventProcessLoop.post(
-                    VerificationVerdictEvent(stageId, index1, index2, partitionId, "BOTH_MATCH", Some(driverResult)))
+                  postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, "BOTH_MATCH", Some(driverResult))
 
                 case (false, false) =>
                   logError(s"[X] CRITICAL: Driver leaf hash differs from BOTH replicas")
                   logError(s"[X] Using driver result as ground truth (system error or Byzantine driver)")
-                  dagScheduler.eventProcessLoop.post(
-                    VerificationVerdictEvent(stageId, index1, index2, partitionId, "NEITHER_MATCH", Some(driverResult)))
+                  postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, "NEITHER_MATCH", Some(driverResult))
               }
 
             case _ =>
@@ -888,25 +1038,21 @@ object TaskResultVerificationManager extends Logging {
 
               (driverHash == hash1, driverHash == hash2) match {
                 case (true, false) =>
-                  logInfo(s"[VERDICT] Replica 1 (idx$index1) is CORRECT, Replica 2 (idx$index2) is BYZANTINE")
-                  dagScheduler.eventProcessLoop.post(
-                    VerificationVerdictEvent(stageId, index1, index2, partitionId, "REPLICA_1_CORRECT", Some(driverResult)))
+                  logWarning(s"[VERDICT] Replica 1 (idx$index1) is CORRECT, Replica 2 (idx$index2) is BYZANTINE")
+                  postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, "REPLICA_1_CORRECT", Some(driverResult))
 
                 case (false, true) =>
-                  logInfo(s"[VERDICT] Replica 2 (idx$index2) is CORRECT, Replica 1 (idx$index1) is BYZANTINE")
-                  dagScheduler.eventProcessLoop.post(
-                    VerificationVerdictEvent(stageId, index1, index2, partitionId, "REPLICA_2_CORRECT", Some(driverResult)))
+                  logWarning(s"[VERDICT] Replica 2 (idx$index2) is CORRECT, Replica 1 (idx$index1) is BYZANTINE")
+                  postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, "REPLICA_2_CORRECT", Some(driverResult))
 
                 case (true, true) =>
                   logWarning(s"[?] UNEXPECTED: Both replicas match driver, but were reported as different - possible race condition")
-                  dagScheduler.eventProcessLoop.post(
-                    VerificationVerdictEvent(stageId, index1, index2, partitionId, "BOTH_MATCH", Some(driverResult)))
+                  postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, "BOTH_MATCH", Some(driverResult))
 
                 case (false, false) =>
                   logError(s"[X] CRITICAL: Driver result differs from BOTH replicas - system error or driver fault!")
                   logError(s"[X] Using driver result as ground truth")
-                  dagScheduler.eventProcessLoop.post(
-                    VerificationVerdictEvent(stageId, index1, index2, partitionId, "NEITHER_MATCH", Some(driverResult)))
+                  postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, "NEITHER_MATCH", Some(driverResult))
               }
           }
 
@@ -980,15 +1126,15 @@ object TaskResultVerificationManager extends Logging {
         case (true, false) =>
           // Only replica 1 exists - replica 1 is correct
           logInfo(s"[FILE CHECK] Only replica 1 file exists - declaring replica 1 correct")
-          logInfo(s"[EARLY VERDICT] Replica 1 (idx$index1) is CORRECT (file exists)")
-          logInfo(s"[EARLY VERDICT] Replica 2 (idx$index2) is BYZANTINE (file missing)")
+          logWarning(s"[EARLY VERDICT] Replica 1 (idx$index1) is CORRECT (file exists)")
+          logWarning(s"[EARLY VERDICT] Replica 2 (idx$index2) is BYZANTINE (file missing)")
           return Some((-1L, index1, index2))
           
         case (false, true) =>
           // Only replica 2 exists - replica 2 is correct
           logInfo(s"[FILE CHECK] Only replica 2 file exists - declaring replica 2 correct")
-          logInfo(s"[EARLY VERDICT] Replica 2 (idx$index2) is CORRECT (file exists)")
-          logInfo(s"[EARLY VERDICT] Replica 1 (idx$index1) is BYZANTINE (file missing)")
+          logWarning(s"[EARLY VERDICT] Replica 2 (idx$index2) is CORRECT (file exists)")
+          logWarning(s"[EARLY VERDICT] Replica 1 (idx$index1) is BYZANTINE (file missing)")
           return Some((-1L, index2, index1))
           
         case (false, false) =>
@@ -1017,12 +1163,12 @@ object TaskResultVerificationManager extends Logging {
           
         case BothTreesBuilt(tree1, tree2) =>
           // Both paths (driver and executor) end up here with trees built
-          logInfo(s"[MERKLE] Comparing trees...")
+          logWarning(s"[MERKLE] Comparing trees...")
           val disagreement = org.apache.spark.rdd.MerkleTree.verify(tree1, tree2)
           
           disagreement match {
             case Some((uid, hash1, hash2)) =>
-              logInfo(s"[MERKLE] Found disagreement at UID $uid (idx$index1 leafHash=$hash1, idx$index2 leafHash=$hash2)")
+              logWarning(s"[MERKLE] ✓ Found disagreement at UID $uid (idx$index1 leafHash=$hash1, idx$index2 leafHash=$hash2)")
             case None =>
               logWarning(s"[MERKLE] Trees match but hashes differ - possible hash collision or race condition")
           }
@@ -1064,9 +1210,16 @@ object TaskResultVerificationManager extends Logging {
     logInfo(s"[MERKLE] Building trees on driver for stage $stageId, partition $partitionId")
     
     try {
+      // Start timer for driver merkle tree construction
+      val merkleStartTime = System.nanoTime()
+      
       // Build both trees directly on driver
       val tree1 = org.apache.spark.rdd.MerkleTree.buildFromFinalsFile(finalsPath1, isBinary)
       val tree2 = org.apache.spark.rdd.MerkleTree.buildFromFinalsFile(finalsPath2, isBinary)
+      
+      // Log driver merkle construction time
+      val merkleTime = (System.nanoTime() - merkleStartTime) / 1e9
+      logWarning(s"[PERF-MERKLE-DRIVER] Stage $stageId partition $partitionId: ${merkleTime}s")
       
       logInfo(s"[MERKLE] Driver built tree 1: ${tree1.leafCount} leaves, rootHash=${tree1.rootHash}")
       logInfo(s"[MERKLE] Driver built tree 2: ${tree2.leafCount} leaves, rootHash=${tree2.rootHash}")
@@ -1076,7 +1229,8 @@ object TaskResultVerificationManager extends Logging {
       val isUnsafe2 = (tree2.leafCount == 1 && tree2.rootHash == UnsafeStageMarkers.UNSAFE_STAGE_HASH)
       
       if (isUnsafe1 && isUnsafe2) {
-        logInfo(s"[MERKLE] Both replicas are UNSAFE_STAGE - triggering full-task recomputation")
+        logWarning(s"[MERKLE] Both replicas are UNSAFE_STAGE - no narrow transformations before shuffle")
+        logWarning(s"[MERKLE] Triggering full-task recomputation (backup iterator mechanism)")
         return MerkleBuildFailure("Both replicas from unsafe stage - full-task verification required")
       }
       
@@ -1161,6 +1315,7 @@ object TaskResultVerificationManager extends Logging {
           )
           
         logInfo(s"[MERKLE] Submitting TaskSet with 2 tree build tasks")
+        logWarning(s"[TASK ID CONSUMPTION] Merkle TaskSet will consume task IDs when scheduled (2 tasks for partition ${partitionId})")
         taskScheduler.submitTasks(taskSet)
         
         // Calculate adaptive Merkle timeout proportional to verification timeout
@@ -1170,6 +1325,7 @@ object TaskResultVerificationManager extends Logging {
         
         logInfo(s"[MERKLE] Waiting for tree build results (timeout=${adaptiveMerkleTimeout}ms, " +
                 s"${adaptiveMerkleTimeout / 1000}s, based on verification timeout)")
+        
         val result1Opt = waitForMerkleTreeBuildResult(stageId, index1, partitionId, adaptiveMerkleTimeout)
         val result2Opt = waitForMerkleTreeBuildResult(stageId, index2, partitionId, adaptiveMerkleTimeout)
         
@@ -1189,7 +1345,8 @@ object TaskResultVerificationManager extends Logging {
             
             // If both are unsafe stages, skip Merkle and do full-task recomputation
             if (isUnsafe1 && isUnsafe2) {
-              logInfo(s"[MERKLE] Both replicas are UNSAFE_STAGE - triggering full-task recomputation")
+              logWarning(s"[MERKLE] Both replicas are UNSAFE_STAGE - no narrow transformations before shuffle")
+              logWarning(s"[MERKLE] Triggering full-task recomputation (backup iterator mechanism)")
               return MerkleBuildFailure("Both replicas from unsafe stage - full-task verification required")
             }
             
@@ -1221,8 +1378,8 @@ object TaskResultVerificationManager extends Logging {
             // Replica 2 timed out/failed
             // Empty or not, if one succeeded and other failed → success wins
             logWarning(s"[MERKLE] Replica 2 (idx$index2) timed out/failed on tree building")
-            logInfo(s"[EARLY VERDICT] Replica 1 (idx$index1) is CORRECT (responded in ${result1.buildTimeMs}ms)")
-            logInfo(s"[EARLY VERDICT] Replica 2 (idx$index2) is BYZANTINE (timeout/failure = non-responsive)")
+            logWarning(s"[EARLY VERDICT] Replica 1 (idx$index1) is CORRECT (responded in ${result1.buildTimeMs}ms)")
+            logWarning(s"[EARLY VERDICT] Replica 2 (idx$index2) is BYZANTINE (timeout/failure = non-responsive)")
             logInfo(s"[MERKLE] Skipping tree comparison - timeout indicates Byzantine behavior")
             EarlyVerdict(index1, index2, s"Replica $index2 timed out after ${adaptiveMerkleTimeout}ms")
             
@@ -1230,8 +1387,8 @@ object TaskResultVerificationManager extends Logging {
             // Replica 1 timed out/failed
             // Empty or not, if one succeeded and other failed → success wins
             logWarning(s"[MERKLE] Replica 1 (idx$index1) timed out/failed on tree building")
-            logInfo(s"[EARLY VERDICT] Replica 2 (idx$index2) is CORRECT (responded in ${result2.buildTimeMs}ms)")
-            logInfo(s"[EARLY VERDICT] Replica 1 (idx$index1) is BYZANTINE (timeout/failure = non-responsive)")
+            logWarning(s"[EARLY VERDICT] Replica 2 (idx$index2) is CORRECT (responded in ${result2.buildTimeMs}ms)")
+            logWarning(s"[EARLY VERDICT] Replica 1 (idx$index1) is BYZANTINE (timeout/failure = non-responsive)")
             logInfo(s"[MERKLE] Skipping tree comparison - timeout indicates Byzantine behavior")
             EarlyVerdict(index2, index1, s"Replica $index1 timed out after ${adaptiveMerkleTimeout}ms")
             

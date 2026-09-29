@@ -128,7 +128,10 @@ private[spark] object Trace extends Logging {
    * Once set, downstream transformations cannot restore UID correlation.
    */
   private[rdd] def markCorrelationBroken(): Unit = {
+    val wasAlreadyBroken = correlationBrokenTL.get()
     correlationBrokenTL.set(true)
+    // Use System.err to ensure it appears in logs even with log level filtering
+    System.err.println(s"[CORRELATION-DEBUG] markCorrelationBroken called (was already broken: $wasAlreadyBroken)")
   }
 
   /**
@@ -152,11 +155,14 @@ private[spark] object Trace extends Logging {
    * Must be called at the beginning of each task.
    */
   def initForTask(): Unit = {
+    val wasBroken = correlationBrokenTL.get()
     q.clear()
     ctr.set(0L)
     clearBackupIterator()
     backupQueueTL.set(new ArrayDeque[Long]())
     correlationBrokenTL.set(false)
+    // Use System.err to ensure it appears in logs even with log level filtering
+    System.err.println(s"[CORRELATION-DEBUG] initForTask called (correlation was broken: $wasBroken, now reset to false)")
   }
 
   /**

@@ -314,13 +314,89 @@ private[spark] class DAGScheduler(
   /**
    * Check if a stage has any pending verifications that are still in progress.
    * Used to prevent premature cleanup of stage resources before verification completes.
+   * 
+   * Checks both:
+   * 1. pendingVerificationResults - verifications waiting for verdict
+   * 2. verificationInProgress - verifications dispatched but not yet complete
+   * 
+   * This prevents race conditions where stage cleanup happens before batching completes.
    */
   def hasPendingVerifications(stageId: Int): Boolean = {
-    val pending = pendingVerificationResults.keys.exists(_._1 == stageId)
+    val pendingVerdicts = pendingVerificationResults.keys.exists(_._1 == stageId)
+    val inProgress = TaskResultVerificationManager.verificationInProgress.exists(_._1 == stageId)
+    val pending = pendingVerdicts || inProgress
+    
     if (pending) {
-      logDebug(s"[VERIFICATION] Stage $stageId has pending verifications, delaying cleanup")
+      logDebug(s"[VERIFICATION] Stage $stageId has pending verifications (verdicts=$pendingVerdicts, inProgress=$inProgress) - delaying cleanup")
     }
     pending
+  }
+
+  /**
+   * Determines if a stage is the final stage of a user action.
+   * Final stages are eligible for Merkle verification, while intermediate stages use full-task.
+   * 
+   * Detection strategy:
+   * 1. Exclude ShuffleMapStages (always intermediate)
+   * 2. Check if triggered by a user action (via callSite) vs internal transformation job
+   *    - User actions: collect, count, reduce, aggregate, etc.
+   *    - Internal jobs: sortByKey, groupByKey (trigger sampling/preparation stages)
+   * 3. Verify it's the latest job and the max stage within that job
+   * 
+   * This prevents NEITHER_MATCH verdicts from pseudo-deterministic internal stages (e.g., sampling)
+   * that work with full-task replay but fail with single-element Merkle verification.
+   */
+  def isFinalStage(stageId: Int): Boolean = {
+    stageIdToStage.get(stageId) match {
+      case Some(stage) =>
+        // Check 1: ShuffleMapStage is NEVER final (always produces shuffle output for next stage)
+        val isShuffleMapStage = stage.isInstanceOf[ShuffleMapStage]
+        if (isShuffleMapStage) {
+          logInfo(s"[VERIFICATION] Stage $stageId is ShuffleMapStage - not final")
+          return false
+        }
+        
+        // Check 2: Get the action from job's callSite
+        val stageJobId = if (stage.jobIds.nonEmpty) stage.jobIds.max else -1
+        val jobOpt = jobIdToActiveJob.get(stageJobId)
+        val callSiteShort = jobOpt.map(_.callSite.shortForm).getOrElse("unknown")
+        
+        // Known Spark actions that trigger user computations
+        // Transformations like sortByKey, groupByKey trigger internal jobs and should NOT be final
+        val knownActions = Set(
+          "collect", "count", "reduce", "fold", "aggregate",
+          "take", "first", "foreach", "saveas", "countbykey",
+          "takesample", "top", "min", "max", "sum"
+        )
+        
+        val callSiteLower = callSiteShort.toLowerCase
+        val isUserAction = knownActions.exists(action => callSiteLower.contains(action))
+        
+        if (!isUserAction) {
+          logInfo(s"[VERIFICATION] Stage $stageId is internal job ($callSiteShort) - not final")
+          return false
+        }
+        
+        // Check 3: Job and stage position (must be latest job and max stage in that job)
+        val latestJobId = nextJobId.get() - 1
+        val isLatestJob = (stageJobId == latestJobId)
+        
+        val stagesInJob = jobIdToStageIds.getOrElse(stageJobId, Set.empty[Int])
+        val maxStageIdInJob = if (stagesInJob.nonEmpty) stagesInJob.max else -1
+        val isMaxStageInJob = (stageId == maxStageIdInJob)
+        
+        val isFinal = isUserAction && isLatestJob && isMaxStageInJob
+        
+        logInfo(s"[VERIFICATION] Stage $stageId: action=$callSiteShort, " +
+                s"job=$stageJobId/$latestJobId, stage=$stageId/$maxStageIdInJob => " +
+                s"isFinal=$isFinal")
+        
+        isFinal
+        
+      case None =>
+        logWarning(s"[VERIFICATION] Stage $stageId not found - defaulting to false")
+        false
+    }
   }
 
   /**
@@ -979,10 +1055,10 @@ private[spark] class DAGScheduler(
     ThreadUtils.awaitReady(waiter.completionFuture, Duration.Inf)
     waiter.completionFuture.value.get match {
       case scala.util.Success(_) =>
-        logInfo("Job %d finished: %s, took %f s".format
+        logWarning("Job %d finished: %s, took %f s".format
           (waiter.jobId, callSite.shortForm, (System.nanoTime - start) / 1e9))
       case scala.util.Failure(exception) =>
-        logInfo("Job %d failed: %s, took %f s".format
+        logWarning("Job %d failed: %s, took %f s".format
           (waiter.jobId, callSite.shortForm, (System.nanoTime - start) / 1e9))
         // SPARK-8644: Include user stack trace in exceptions coming from DAGScheduler.
         val callerStackTrace = Thread.currentThread().getStackTrace.tail
@@ -1590,10 +1666,15 @@ private[spark] class DAGScheduler(
     if (tasks.nonEmpty) {
       logInfo(s"Submitting ${tasks.size} missing tasks from $stage (${stage.rdd}) (first 15 " +
         s"tasks are for partitions ${tasks.take(15).map(_.partitionId)})")
-      logInfo(s"[+] Created ${tasks.size} replica tasks for ${partitionsToCompute.size} partitions (2x replication)")
+      logInfo(s"[PERF-REPLICATION] Stage ${stage.id}: Created ${tasks.size} replica tasks for ${partitionsToCompute.size} partitions (2x replication)")
       
       val tasksArray = tasks.toArray
       logInfo(s"[TASK SUBMIT] Stage ${stage.id}: Created ${tasksArray.size} tasks, submitting to TaskScheduler")
+      
+      // Log current task ID counter before submission to track ID consumption
+      val currentTaskIdCounter = taskScheduler.asInstanceOf[TaskSchedulerImpl].nextTaskId.get()
+      logInfo(s"[TASK ID TRACKING] Stage ${stage.id}: Current task ID counter = ${currentTaskIdCounter}, will assign IDs ${currentTaskIdCounter} to ${currentTaskIdCounter + tasksArray.size - 1}")
+      
       tasksArray.zipWithIndex.foreach { case (task, idx) =>
         logInfo(s"[TASK SUBMIT]   Task $idx: partitionId=${task.partitionId}")
       }
@@ -2442,6 +2523,8 @@ private[spark] class DAGScheduler(
           pendingVerificationResults.remove((stageId, partitionId))
           activeTimeouts.remove((stageId, partitionId))
           driverVerificationActive.remove((stageId, partitionId))
+          // Remove from verificationInProgress so stage cleanup can proceed
+          TaskResultVerificationManager.verificationInProgress.remove((stageId, partitionId))
           
           // Commit the CORRECT result to the job
           // Use bypassBatching=true because we already have both events and selected the correct one
@@ -2525,6 +2608,7 @@ private[spark] class DAGScheduler(
                 pendingVerificationResults.remove((stageId, partitionId))
                 activeTimeouts.remove((stageId, partitionId))
                 driverVerificationActive.remove((stageId, partitionId))
+                TaskResultVerificationManager.verificationInProgress.remove((stageId, partitionId))
                 
                 // Abort all dependent jobs - driver is last resort, no fallback available
                 val stage = stageIdToStage.get(stageId)
@@ -2582,6 +2666,7 @@ private[spark] class DAGScheduler(
               logDebug(s"[TIMEOUT] No pending verification found (may have completed)")
               activeTimeouts.remove((stageId, partitionId))
               driverVerificationActive.remove((stageId, partitionId))
+              TaskResultVerificationManager.verificationInProgress.remove((stageId, partitionId))
           }
           
         case Some(_) =>

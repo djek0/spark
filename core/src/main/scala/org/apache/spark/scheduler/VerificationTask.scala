@@ -115,9 +115,9 @@ private[spark] class VerificationTask(
     (targetElementId, merkleLeafHashes) match {
       case (Some(uid), Some((leafHash1, leafHash2))) =>
         // SINGLE-ELEMENT MODE: Compare leaf hashes
-        logInfo(s"[EXECUTOR RECOMPUTE] Single-element mode: UID $uid")
-        logInfo(s"[EXECUTOR RECOMPUTE] Replica 1 (idx$replicaIndex1) leaf hash: $leafHash1")
-        logInfo(s"[EXECUTOR RECOMPUTE] Replica 2 (idx$replicaIndex2) leaf hash: $leafHash2")
+        logWarning(s"[EXECUTOR RECOMPUTE] Single-element mode: UID $uid")
+        logWarning(s"[EXECUTOR RECOMPUTE] Replica 1 (idx$replicaIndex1) leaf hash: $leafHash1")
+        logWarning(s"[EXECUTOR RECOMPUTE] Replica 2 (idx$replicaIndex2) leaf hash: $leafHash2")
         
         // Create TaskContext with targetElementId for filtering
         val filteredContext = new org.apache.spark.TaskContextImpl(
@@ -136,20 +136,44 @@ private[spark] class VerificationTask(
         )
         
         TaskContext.setTaskContext(filteredContext)
+        
+        // Start timer for single-element verification
+        val singleElementStartTime = System.nanoTime()
+        
         val result = originalTask.runTask(filteredContext)
         
-        // Extract single element and compute leaf hash (same as SafeWriter format)
-        val elementAtUid = result match {
-          case arr: Array[_] if arr.length > 0 => arr(0)
-          case other => other
+        // Log single-element verification time
+        val singleElementTime = (System.nanoTime() - singleElementStartTime) / 1e9
+        logWarning(s"[PERF-MERKLE-ELEMENT] Stage $stageId partition $partitionId: ${singleElementTime}s")
+        
+        // Extract the element at UID - prefer captured backup value
+        val elementAtUid = filteredContext match {
+          case ctx: TaskContextImpl if ctx.getCapturedBackupValue.isDefined =>
+            logWarning(s"[VERIFICATION] Using captured backup value (same stage as finals file)")
+            ctx.getCapturedBackupValue.get
+          case _ =>
+            // Fallback: extract from task result
+            logWarning(s"[VERIFICATION] Using task result (no backup value captured)")
+            result match {
+              case arr: Array[_] if arr.length > 0 => arr(0)
+              case other => other
+            }
         }
-        val verifierValue = elementAtUid match {
+        
+        // Helper function to format values with proper array handling (same as SafeWriter.writeEntry)
+        def formatValueWithArrays(value: Any): String = value match {
           case arr: Array[_] => arr.mkString("[", ",", "]")
+          case prod: Product => 
+            // Handle tuples and case classes - recursively format nested arrays
+            prod.productIterator.map(formatValueWithArrays).mkString("(", ",", ")")
           case other => other.toString
         }
+        
+        val verifierValue = formatValueWithArrays(elementAtUid)
         val verifierLeafHash = verifierValue.hashCode
         
-        logInfo(s"[VERIFICATION] Verifier leaf hash: $verifierLeafHash")
+        logWarning(s"[VERIFICATION] Verifier computed value: $verifierValue")
+        logWarning(s"[VERIFICATION] Verifier leaf hash: $verifierLeafHash")
         
         // Compare leaf hashes
         val verdict = (verifierLeafHash == leafHash1, verifierLeafHash == leafHash2) match {
@@ -159,7 +183,7 @@ private[spark] class VerificationTask(
           case (false, false) => "NEITHER_MATCH"
         }
         
-        logInfo(s"[VERIFICATION] Verdict: $verdict")
+        logWarning(s"[VERIFICATION] Verdict: $verdict (verifier=$verifierLeafHash vs replica1=$leafHash1 vs replica2=$leafHash2)")
         
         VerificationVerdict(
           stageId = stageId,
@@ -178,7 +202,14 @@ private[spark] class VerificationTask(
         logInfo(s"[VERIFICATION] Replica 1 (idx$replicaIndex1) hash: $replicaHash1")
         logInfo(s"[VERIFICATION] Replica 2 (idx$replicaIndex2) hash: $replicaHash2")
         
+        // Start timer for full-task verification
+        val fullTaskStartTime = System.nanoTime()
+        
         val result = originalTask.runTask(context)
+        
+        // Log full-task verification time
+        val fullTaskTime = (System.nanoTime() - fullTaskStartTime) / 1e9
+        logWarning(s"[PERF-FULLTASK] Stage $stageId partition $partitionId: ${fullTaskTime}s")
         
         // Use same hashing logic as Executor.scala for consistency
         val verifierHash = if (originalTask.isInstanceOf[ShuffleMapTask]) {

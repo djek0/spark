@@ -61,6 +61,21 @@ private[spark] class TaskContextImpl(
   with Logging {
 
   override def isVerificationTask: Boolean = targetElementId.isDefined
+  
+  /**
+   * Captured backup iterator value for verification tasks.
+   * When verification task computes through unsafe transformations,
+   * we capture the intermediate value at the backup iterator checkpoint
+   * (where Merkle tree was built) instead of the final result.
+   * This ensures verification compares the same values that were logged.
+   */
+  @volatile private var capturedBackupValue: Option[Any] = None
+  
+  def setCapturedBackupValue(value: Any): Unit = {
+    capturedBackupValue = Some(value)
+  }
+  
+  def getCapturedBackupValue: Option[Any] = capturedBackupValue
 
   /** List of callback functions to execute when the task completes. */
   @transient private val onCompleteCallbacks = new ArrayBuffer[TaskCompletionListener]

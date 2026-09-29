@@ -48,7 +48,6 @@ import org.apache.spark.internal.config._
 import org.apache.spark.internal.plugin.PluginContainer
 import org.apache.spark.memory.{SparkOutOfMemoryError, TaskMemoryManager}
 import org.apache.spark.metrics.source.JVMCPUSource
-import org.apache.spark.util.FileFormatUtils
 import org.apache.spark.resource.ResourceInformation
 import org.apache.spark.rpc.RpcTimeout
 import org.apache.spark.scheduler._
@@ -118,6 +117,33 @@ private[spark] class Executor(
       .build()
     Executors.newCachedThreadPool(threadFactory).asInstanceOf[ThreadPoolExecutor]
   }
+  
+  // Dedicated thread pool for verification tasks (VerificationTask, MerkleTreeBuildTask)
+  // Only created if VERIFICATION_POOL_SIZE is set and > 0
+  // This ensures verification tasks NEVER run on potentially Byzantine workers
+  private val verificationThreadPool: Option[ThreadPoolExecutor] = {
+    val poolSize = sys.env.get("VERIFICATION_POOL_SIZE")
+      .flatMap(s => scala.util.Try(s.toInt).toOption)
+      .filter(_ > 0)  // Only create pool if size is positive
+    
+    poolSize match {
+      case Some(size) =>
+        logWarning(s"[VERIFICATION POOL] Creating dedicated verification pool with $size threads")
+        
+        val threadFactory = new ThreadFactoryBuilder()
+          .setDaemon(true)
+          .setNameFormat("Executor TRUSTED verification worker-%d")
+          .setThreadFactory((r: Runnable) => new UninterruptibleThread(r, "unused"))
+          .build()
+        
+        Some(Executors.newFixedThreadPool(size, threadFactory).asInstanceOf[ThreadPoolExecutor])
+      
+      case None =>
+        logWarning(s"[VERIFICATION POOL] Verification pool disabled (VERIFICATION_POOL_SIZE not set)")
+        None
+    }
+  }
+  
   private val schemes = conf.get(EXECUTOR_METRICS_FILESYSTEM_SCHEMES)
     .toLowerCase(Locale.ROOT).split(",").map(_.trim).filter(_.nonEmpty)
   private val executorSource = new ExecutorSource(threadPool, executorId, schemes)
@@ -181,6 +207,26 @@ private[spark] class Executor(
 
   // Maintains the list of running tasks.
   private val runningTasks = new ConcurrentHashMap[Long, TaskRunner]
+
+  /**
+   * Extract worker ID from Java thread ID for logging and identification.
+   * Also detects if the current thread is from the dedicated verification pool.
+   * 
+   * @param originalThreadName The original thread name before TaskRunner overrides it
+   * @return tuple of (worker ID, isVerificationPoolThread)
+   */
+  private def getLocalWorkerIdFromThread(originalThreadName: String): (Int, Boolean) = {
+    val threadId = Thread.currentThread().getId()
+    
+    // Check if this thread is from the trusted verification pool using the ORIGINAL name
+    // (TaskRunner.run() overrides the thread name, so we must check before that happens)
+    val isTrustedVerificationThread = originalThreadName.contains("TRUSTED verification worker")
+    
+    // Use thread ID modulo 100 to get a stable worker ID in 0-99 range
+    val workerId = (threadId % 100).toInt
+    
+    (workerId, isTrustedVerificationThread)
+  }
 
   /**
    * When an executor is unable to send heartbeats to the driver more than `HEARTBEAT_MAX_FAILURES`
@@ -273,9 +319,36 @@ private[spark] class Executor(
   def launchTask(context: ExecutorBackend, taskDescription: TaskDescription): Unit = {
     val tr = new TaskRunner(context, taskDescription, plugins)
     runningTasks.put(taskDescription.taskId, tr)
-    threadPool.execute(tr)
+    logInfo(s"[VERIFICATION ROUTING] 1. Launching task ${taskDescription.taskId}")
+    // Check if this is a verification task by peeking at the serialized task class
+    // We duplicate the ByteBuffer to avoid consuming it (TaskRunner will deserialize again)
+    val isVerificationTask = try {
+      val duplicatedBuffer = taskDescription.serializedTask.duplicate()
+      val taskSetManager = env.closureSerializer.newInstance()
+      val task = taskSetManager.deserialize[Task[Any]](
+        duplicatedBuffer, Thread.currentThread.getContextClassLoader)
+      val taskClassName = task.getClass.getName
+      logInfo(s"[VERIFICATION ROUTING] 2. Task ${taskDescription.taskId} is ${taskClassName}")
+      taskClassName.contains("MerkleTreeBuildTask") || taskClassName.contains("VerificationTask")
+    } catch {
+      case e: Exception =>
+        logInfo(s"[VERIFICATION ROUTING] 3. Failed to peek at task type for ${taskDescription.taskId}, routing to normal pool")
+        false
+    }
+    
+    if (isVerificationTask && verificationThreadPool.isDefined) {
+      logInfo(s"[VERIFICATION ROUTING] 4. Task ${taskDescription.taskId} routed to DEDICATED verification pool")
+      verificationThreadPool.get.execute(tr)
+    } else {
+      if (isVerificationTask && verificationThreadPool.isEmpty) {
+        logInfo(s"[VERIFICATION ROUTING] 5. Task ${taskDescription.taskId} is verification task but no dedicated pool - using NORMAL pool")
+      }
+      logInfo(s"[VERIFICATION ROUTING] 6.Task ${taskDescription.taskId} routed to NORMAL pool")
+      threadPool.execute(tr)
+    }
+    
     if (decommissioned) {
-      log.error(s"Launching a task while in decommissioned state.")
+      log.error(s" 7. Launching a task while in decommissioned state.")
     }
   }
 
@@ -334,6 +407,12 @@ private[spark] class Executor(
       }
       ShuffleBlockPusher.stop()
       threadPool.shutdown()
+      
+      // Shutdown verification thread pool if it exists
+      verificationThreadPool.foreach { pool =>
+        logWarning("[VERIFICATION POOL] Shutting down trusted verification thread pool")
+        pool.shutdown()
+      }
 
       // Notify plugins that executor is shutting down so they can terminate cleanly
       Utils.withContextClassLoader(replClassLoader) {
@@ -439,6 +518,8 @@ private[spark] class Executor(
     override def run(): Unit = {
       setMDCForTask(taskName, mdcProperties)
       threadId = Thread.currentThread.getId
+      // Capture original thread name BEFORE we override it (to detect verification pool threads)
+      val originalThreadName = Thread.currentThread.getName
       Thread.currentThread.setName(threadName)
       val threadMXBean = ManagementFactory.getThreadMXBean
       val taskMemoryManager = new TaskMemoryManager(env.memoryManager, taskId)
@@ -597,18 +678,38 @@ private[spark] class Executor(
               } catch {
                 case _: NumberFormatException =>
                   logInfo(s"[BYZANTINE CONFIG] Invalid ENV value '$intervalStr', using default Byzantine behavior, every 3rd task is Byzantine")
-                  3
+                  10
               }
             case None =>
-              logInfo(s"[BYZANTINE CONFIG] Using default interval : every 3rd task is Byzantine")
-              3
+              logInfo(s"[BYZANTINE CONFIG] Using default interval : every 10nth task is Byzantine")
+              10
           }
         } else {
           0   // Honest mode - no Byzantine behavior
         }
         
-        // Use modulo arithmetic for deterministic, evenly-distributed Byzantine selection
-        val shouldBeByzantine = byzantineInterval > 0 && (taskId % byzantineInterval == 0)
+        // PHASE 2: Simplified Byzantine selection (verification tasks run on dedicated pool)
+        val (localWorkerId, isTrustedVerificationThread) = getLocalWorkerIdFromThread(originalThreadName)
+        
+        // Get task index for replica differentiation
+        val taskIndex = taskDescription.index
+        
+        // Byzantine selection: Simple partition-based + index-based selection
+        // No trusted worker concept needed since verification tasks run on separate pool
+        val shouldBeByzantine = if (byzantineInterval > 0 && !isVerificationTask) {
+          // Byzantine on specific partitions AND only first replica (index % 2 == 0)
+          // This ensures only ONE replica per partition is Byzantine
+          (task.partitionId % byzantineInterval == 0) && (taskIndex % 2 == 0)
+        } else {
+          false  // Honest mode or verification task
+        }
+        
+        // Log Byzantine selection decision
+        if (honestFlag == "False" && !isVerificationTask) {
+          logInfo(s"[BYZANTINE SELECTION] Task $taskId (${taskClassName}): " +
+            s"workerId=$localWorkerId, partitionId=${task.partitionId}, taskIndex=$taskIndex, " +
+            s"byzantineInterval=$byzantineInterval, willBeByzantine=$shouldBeByzantine")
+        }
         
 
 
@@ -712,47 +813,118 @@ private[spark] class Executor(
         
         // BYZANTINE FAULT INJECTION: Corrupt hash only, keep valueBytes intact
         val hashValueCandidate = if (honestFlag == "False" && shouldBeByzantine && !isVerificationTask) {
-          logInfo(s"[BYZANTINE CONFIG] Task $taskId is Byzantine (taskId % $byzantineInterval == 0)")
-          logInfo(s"[BYZANTINE TEST] TRYING TO CHEAT - EXECUTOR: $taskId - corrupting hash only, keeping result bytes valid")
+          logWarning(s"[BYZANTINE CONFIG] Task $taskId is Byzantine (taskId % $byzantineInterval == 0)")
+          logWarning(s"[BYZANTINE INJECTION] *** CORRUPTING TASK $taskId *** (${taskClassName}, partition ${task.partitionId})")
+          logWarning(s"[BYZANTINE TEST] TRYING TO CHEAT - EXECUTOR: $taskId - corrupting hash only, keeping result bytes valid")
           
           // Generate random bit pattern for hash corruption
           val random = new scala.util.Random(taskId) // Seed with taskId for reproducibility
-          val randomBitPattern = random.nextLong()
-          val byzantineHash = honestHash ^ randomBitPattern
+          var randomBitPattern = random.nextLong()
+          // Ensure pattern is never zero (XOR with 0 = no corruption!)
+          if (randomBitPattern == 0L) randomBitPattern = 1L
           
-           logInfo(s"[BYZANTINE TEST] Hash corruption: honest=$honestHash -> byzantine=$byzantineHash (XOR with $randomBitPattern)")
+          // Generate Byzantine hash and ensure it ALWAYS differs from honest hash
+          var byzantineHash = honestHash ^ randomBitPattern
+          // Extra safety: if XOR somehow produces same value, use fixed pattern
+          if (byzantineHash == honestHash) {
+            byzantineHash = honestHash ^ 0xDEADBEEFCAFEBABEL
+            logWarning(s"[BYZANTINE TEST] XOR produced same hash! Using fallback pattern")
+          }
           
-          // Also corrupt the finals file so Merkle tree verification can detect the disagreement
-          // Without this, only the serialized result hash differs but the finals files are identical
+           logWarning(s"[BYZANTINE TEST] Hash corruption: honest=$honestHash -> byzantine=$byzantineHash (XOR with $randomBitPattern)")
+          
+          // STRONGER finals file corruption: Replace ENTIRE last value with Byzantine data
+          // This ensures Merkle trees will DEFINITELY differ (not just random byte flips)
+          // STRATEGY: Commit THIS partition's finals file early, then corrupt it
+          logWarning(s"[BYZANTINE TEST] Starting finals file corruption attempt...")
           try {
             val appName = Option(SparkEnv.get)
               .flatMap(e => Option(e.conf.get("spark.app.name", "unknown")))
               .getOrElse("unknown")
             val debugMode = sys.env.getOrElse("DEBUG_MODE", "false").toBoolean
+            
+            // Build path to finals files
+            val userHome = System.getProperty("user.home")
+            val finalDir = if (debugMode) "logs" else "bins"
+            val tmpFile = new java.io.File(
+              s"$userHome/spark/spark-trace/$appName/$finalDir/spark_finals_stage${task.stageId}_idx${taskDescription.index}_p${task.partitionId}.tmp")
+            val ext = if (debugMode) ".log" else ".bin"
             val finalsFile = new java.io.File(
-              FileFormatUtils.buildFinalsPath(appName, task.stageId, taskDescription.index, task.partitionId, debugMode))
+              s"$userHome/spark/spark-trace/$appName/$finalDir/spark_finals_stage${task.stageId}_idx${taskDescription.index}_p${task.partitionId}$ext")
 
+            logWarning(s"[BYZANTINE TEST] Looking for finals .tmp file: ${tmpFile.getAbsolutePath}")
+            
+            // STEP 1: Find and commit the SafeWriter for this partition ONLY
+            val threadName = Thread.currentThread().getName
+            val writerList = org.apache.spark.rdd.Trace.getActiveWriters(threadName)
+            var committedEarly = false
+            
+            if (writerList != null && !writerList.isEmpty) {
+              logWarning(s"[BYZANTINE TEST] Found ${writerList.size()} active writers for thread $threadName")
+              val it = writerList.iterator()
+              while (it.hasNext && !committedEarly) {
+                val writer = it.next()
+                val writerPath = writer.targetFile.getAbsolutePath
+                logWarning(s"[BYZANTINE TEST] Checking writer: $writerPath")
+                
+                if (writerPath == tmpFile.getAbsolutePath) {
+                  logWarning(s"[BYZANTINE TEST] ✓ MATCH! Found SafeWriter for this partition")
+                  logWarning(s"[BYZANTINE TEST] Closing writer...")
+                  writer.safeClose()  // Close the writer first
+                  
+                  logWarning(s"[BYZANTINE TEST] Committing: ${tmpFile.getName} → ${finalsFile.getName}")
+                  org.apache.spark.rdd.Trace.commitLogs(writer)  // Commit: .tmp → .bin/.log
+                  
+                  // Wait a moment for filesystem to sync
+                  Thread.sleep(100)
+                  
+                  committedEarly = true
+                  logWarning(s"[BYZANTINE TEST] ✓ Early commit successful!")
+                }
+              }
+            } else {
+              logWarning(s"[BYZANTINE TEST] No active writers found for thread $threadName")
+            }
+            
+            if (!committedEarly) {
+              logWarning(s"[BYZANTINE TEST] ✗ WARNING: Could not find SafeWriter for early commit!")
+              logWarning(s"[BYZANTINE TEST] Expected path: ${tmpFile.getAbsolutePath}")
+              logWarning(s"[BYZANTINE TEST] Corruption will likely FAIL")
+            }
+            
+            // STEP 2: Verify the committed file exists
+            logWarning(s"[BYZANTINE TEST] Checking for committed finals file: ${finalsFile.getAbsolutePath}")
+            logWarning(s"[BYZANTINE TEST] File exists: ${finalsFile.exists()}, size: ${if (finalsFile.exists()) finalsFile.length() else 0} bytes")
+            
             if (finalsFile.exists()) {
+              logWarning(s"[BYZANTINE TEST] File found, debugMode=$debugMode, choosing corruption path...")
               if (debugMode) {
-                // Text mode: read lines, modify last line's value
+                // Text mode: Replace ENTIRE last value with deterministic Byzantine data
+                logWarning(s"[BYZANTINE TEST] Using TEXT mode corruption")
+                // Keep UID (before |), replace value (after |) completely
                 val src = scala.io.Source.fromFile(finalsFile)
                 val lines = src.getLines().toArray
                 src.close()
                 if (lines.nonEmpty) {
                   val parts = lines.last.split("\\|", 2)
                   if (parts.length == 2) {
-                    lines(lines.length - 1) = s"${parts(0)}|BYZANTINE_CORRUPTED_${random.nextInt().abs}"
+                    // Generate deterministic Byzantine value based on task ID
+                    val byzantineValue = s"BYZANTINE_TASK${taskId}_HASH${byzantineHash}_CORRUPT"
+                    lines(lines.length - 1) = s"${parts(0)}|$byzantineValue"
                     val pw = new java.io.PrintWriter(finalsFile)
                     lines.foreach(pw.println)
                     pw.close()
-                    logInfo(s"[BYZANTINE TEST] Corrupted finals file (text): ${finalsFile.getName}")
+                    logWarning(s"[BYZANTINE TEST] Corrupted finals file (text): ${finalsFile.getName}, replaced value with '$byzantineValue'")
                   }
                 }
               } else {
-                // Binary mode: flip 2 random bytes in last entry's value
+                // Binary mode: Replace ENTIRE last value with deterministic Byzantine bytes
+                logWarning(s"[BYZANTINE TEST] Using BINARY mode corruption")
+                // Keep UID (8 bytes) + length (4 bytes), replace value bytes completely
                 val fileBytes = java.nio.file.Files.readAllBytes(finalsFile.toPath)
                 if (fileBytes.length > 12) { // At least one entry: 8(Long) + 4(Int) + value
                   var pos = 0
+                  var lastEntryStart = -1
                   var lastValueStart = -1
                   var lastValueLen = 0
                   val buf = java.nio.ByteBuffer.wrap(fileBytes)
@@ -761,6 +933,7 @@ private[spark] class Executor(
                     val _uid = buf.getLong()
                     val len = buf.getInt()
                     if (len >= 0 && pos + 12 + len <= fileBytes.length) {
+                      lastEntryStart = pos
                       lastValueStart = pos + 12
                       lastValueLen = len
                       pos += 12 + len
@@ -768,14 +941,20 @@ private[spark] class Executor(
                       pos = fileBytes.length // malformed, stop
                     }
                   }
-                  if (lastValueStart >= 0 && lastValueLen >= 2) {
-                    // Flip 2 random bytes within the value
-                    val byte1Idx = lastValueStart + random.nextInt(lastValueLen)
-                    val byte2Idx = lastValueStart + random.nextInt(lastValueLen)
-                    fileBytes(byte1Idx) = (fileBytes(byte1Idx) ^ 0xFF).toByte
-                    fileBytes(byte2Idx) = (fileBytes(byte2Idx) ^ 0xFF).toByte
+                  if (lastValueStart >= 0 && lastValueLen >= 1) {
+                    // Generate deterministic Byzantine value bytes
+                    // Use task ID and byzantine hash to create unique pattern
+                    val byzantinePattern = s"BYZANTINE_T${taskId}_H${byzantineHash}".getBytes("UTF-8")
+                    
+                    // Fill the entire value region with Byzantine pattern (repeat if needed)
+                    var byteIdx = 0
+                    for (i <- 0 until lastValueLen) {
+                      fileBytes(lastValueStart + i) = byzantinePattern(byteIdx % byzantinePattern.length)
+                      byteIdx += 1
+                    }
+                    
                     java.nio.file.Files.write(finalsFile.toPath, fileBytes)
-                    logInfo(s"[BYZANTINE TEST] Corrupted finals file (binary): ${finalsFile.getName}, flipped bytes at positions $byte1Idx, $byte2Idx")
+                    logWarning(s"[BYZANTINE TEST] Corrupted finals file (binary): ${finalsFile.getName}, replaced ${lastValueLen} bytes with Byzantine pattern")
                   }
                 }
               }

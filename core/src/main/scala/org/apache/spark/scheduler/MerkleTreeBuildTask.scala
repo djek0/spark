@@ -94,9 +94,11 @@ private[spark] class MerkleTreeBuildTask(
     val tree = MerkleTree.buildFromFinalsFile(finalsFilePath, isBinary)
 
     val buildTimeMs = System.currentTimeMillis() - startTime
+    val buildTimeSec = buildTimeMs / 1000.0
 
     logInfo(s"[MERKLE BUILD] Tree built: ${tree.leafCount} leaves, height=${tree.height}, " +
       s"rootHash=${tree.rootHash}, buildTime=${buildTimeMs}ms")
+    logWarning(s"[PERF-MERKLE-EXECUTOR] Stage $stageId partition $partitionId: ${buildTimeSec}s")
 
     // Return result with tree and metadata
     MerkleTreeBuildResult(

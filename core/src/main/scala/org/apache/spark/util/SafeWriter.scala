@@ -122,24 +122,31 @@ private[spark] class SafeWriter(
       throw new IllegalStateException(s"Writer for $file is already closed")
     }
     
+    // Format value with recursive array handling for tuples
+    val valueStr = formatValueWithArrays(value)
+    
     if (binary) {
       dataOut.foreach { out =>
         out.writeLong(uid)
-        val str = value match {
-          case arr: Array[_] => arr.mkString("[", ",", "]")
-          case other => other.toString
-        }
-        val bytes = str.getBytes("UTF-8")
+        val bytes = valueStr.getBytes("UTF-8")
         out.writeInt(bytes.length)
         out.write(bytes)
       }
     } else {
-      val valueStr = value match {
-        case arr: Array[_] => arr.mkString("[", ",", "]")
-        case other => other.toString
-      }
       writer.foreach(_.println(s"$uid|$valueStr"))
     }
+  }
+  
+  /**
+   * Format a value with proper array handling, including arrays nested in tuples.
+   * This ensures deterministic string representation across executors.
+   */
+  private def formatValueWithArrays(value: Any): String = value match {
+    case arr: Array[_] => arr.mkString("[", ",", "]")
+    case prod: Product => 
+      // Handle tuples and case classes - recursively format nested arrays
+      prod.productIterator.map(formatValueWithArrays).mkString("(", ",", ")")
+    case other => other.toString
   }
   
   /**
