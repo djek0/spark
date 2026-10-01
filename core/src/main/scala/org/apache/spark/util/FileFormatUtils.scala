@@ -49,9 +49,13 @@ object FileFormatUtils {
    * @param debugMode whether debug mode is enabled
    * @return absolute path to finals file
    */
-  def buildFinalsPath(appName: String, stageId: Int, taskIndex: Int, partitionId: Int, debugMode: Boolean): String = {
+  def buildTraceBaseDir(): String = {
     val userHome = System.getProperty("user.home")
+    sys.env.getOrElse("SPARK_TRACE_DIR", s"$userHome/spark/spark-trace")
+  }
+
+  def buildFinalsPath(appName: String, stageId: Int, taskIndex: Int, partitionId: Int, debugMode: Boolean): String = {
     val (_, ext, dir) = getFileFormat(debugMode)
-    s"$userHome/spark/spark-trace/$appName/$dir/spark_finals_stage${stageId}_idx${taskIndex}_p${partitionId}${ext}"
+    s"${buildTraceBaseDir()}/$appName/$dir/spark_finals_stage${stageId}_idx${taskIndex}_p${partitionId}${ext}"
   }
 }

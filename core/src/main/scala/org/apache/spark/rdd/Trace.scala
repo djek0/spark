@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicLong
 import scala.util.Properties.envOrElse
 
 import org.apache.spark.internal.Logging
-import org.apache.spark.util.SafeWriter
+import org.apache.spark.util.{FileFormatUtils, SafeWriter}
 
 /**
  * Sentinel values for special stage conditions.
@@ -191,6 +191,8 @@ private[spark] object Trace extends Logging {
   // track the writers so we can commit their logs all at the end of the task
   // Changed to List to support multiple writers per thread (input + output)
   private val activeWriters = new java.util.concurrent.ConcurrentHashMap[String, java.util.List[SafeWriter]]()
+
+  def getActiveWriters(threadName: String): java.util.List[SafeWriter] = activeWriters.get(threadName)
   
   // Debug mode: set to true for human-readable text files (slower), false for binary (faster)
   private val DEBUG_MODE = envOrElse("DEBUG_MODE", "false").toBoolean
@@ -203,9 +205,8 @@ private[spark] object Trace extends Logging {
    * Writes to .tmp file first, renamed to final on commit.
    */
   def createInputWriter(stageId: Int, partitionId: Int, taskIndex: Int, appName: String): SafeWriter = {
-    val userHome = System.getProperty("user.home")
     val finalDir = if (DEBUG_MODE) "logs" else "bins"
-    val dir = new File(s"$userHome/spark/spark-trace/$appName/$finalDir")
+    val dir = new File(s"${FileFormatUtils.buildTraceBaseDir()}/$appName/$finalDir")
     dir.mkdirs()  // Ensure directory exists
     // Always write to .tmp first for atomic commit
     val file = new File(dir, s"spark_inputs_stage${stageId}_idx${taskIndex}_p${partitionId}.tmp")
@@ -230,9 +231,8 @@ private[spark] object Trace extends Logging {
    * Writes to .tmp file first, renamed to final on commit.
    */
   def createOutputWriter(stageId: Int, partitionId: Int, taskIndex: Int, appName: String): SafeWriter = {
-    val userHome = System.getProperty("user.home")
     val finalDir = if (DEBUG_MODE) "logs" else "bins"
-    val dir = new File(s"$userHome/spark/spark-trace/$appName/$finalDir")
+    val dir = new File(s"${FileFormatUtils.buildTraceBaseDir()}/$appName/$finalDir")
     dir.mkdirs()  // Ensure directory exists
     // Always write to .tmp first for atomic commit
     val file = new File(dir, s"spark_finals_stage${stageId}_idx${taskIndex}_p${partitionId}.tmp")

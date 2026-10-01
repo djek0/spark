@@ -843,14 +843,11 @@ private[spark] class Executor(
               .getOrElse("unknown")
             val debugMode = sys.env.getOrElse("DEBUG_MODE", "false").toBoolean
             
-            // Build path to finals files
-            val userHome = System.getProperty("user.home")
-            val finalDir = if (debugMode) "logs" else "bins"
-            val tmpFile = new java.io.File(
-              s"$userHome/spark/spark-trace/$appName/$finalDir/spark_finals_stage${task.stageId}_idx${taskDescription.index}_p${task.partitionId}.tmp")
-            val ext = if (debugMode) ".log" else ".bin"
-            val finalsFile = new java.io.File(
-              s"$userHome/spark/spark-trace/$appName/$finalDir/spark_finals_stage${task.stageId}_idx${taskDescription.index}_p${task.partitionId}$ext")
+            // Build path to finals files using FileFormatUtils (respects SPARK_TRACE_DIR env var)
+            val finalsPath = org.apache.spark.util.FileFormatUtils.buildFinalsPath(
+              appName, task.stageId, taskDescription.index, task.partitionId, debugMode)
+            val tmpFile = new java.io.File(finalsPath.replaceAll("\\.(bin|log)$", ".tmp"))
+            val finalsFile = new java.io.File(finalsPath)
 
             logWarning(s"[BYZANTINE TEST] Looking for finals .tmp file: ${tmpFile.getAbsolutePath}")
             

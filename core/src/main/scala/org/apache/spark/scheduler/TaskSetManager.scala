@@ -202,79 +202,75 @@ private[spark] class TaskSetManager(
    */
   private[scheduler] def isExecutorExcludedForVerification(index: Int, execId: String): Boolean = {
     val task = tasks(index)
-    if (task.isInstanceOf[VerificationTask]) {
-      val verifyTask = task.asInstanceOf[VerificationTask]
-      
-      // CRITICAL: Check trusted pool FIRST (before local mode check)
-      // Trusted pool filtering applies even in local mode
-      val trustedVerifiersOnly = envOrElse("TRUSTED_VERIFIERS_ONLY", "false").toBoolean
+    if (!task.isInstanceOf[VerificationTask]) return false
+    val verifyTask = task.asInstanceOf[VerificationTask]
+
+    val isLocalMode = sched.sc.master.startsWith("local")
+    val trustedVerifiersOnly = envOrElse("TRUSTED_VERIFIERS_ONLY", "false").toBoolean
+
+    if (isLocalMode) {
+      // Local / pseudo mode: use modulo approach for simulated trusted pool testing
       if (trustedVerifiersOnly) {
         val modulo = envOrElse("TRUSTED_VERIFIER_MODULO", "2").toInt
-        
-        // Log raw executor ID to understand format
-        logWarning(s"[TRUSTED POOL DEBUG] Raw execId='$execId' for verification task $index")
-        
-        // Extract executor ID number (format: "driver", "executor-X", or just "X")
-        // Special case: "driver" is treated as executor 0
+        logWarning(s"[TRUSTED POOL LOCAL] Raw execId='$execId' modulo=$modulo")
         val idNum = if (execId == "driver") {
           0
         } else {
-          val execIdNum = execId.replaceAll("[^0-9]", "")
-          if (execIdNum.nonEmpty) {
-            try {
-              execIdNum.toInt
-            } catch {
+          val numeric = execId.replaceAll("[^0-9]", "")
+          if (numeric.nonEmpty) {
+            try { numeric.toInt } catch {
               case _: NumberFormatException =>
-                logWarning(s"[TRUSTED POOL] Could not parse executor ID from '$execId', treating as untrusted")
-                -1  // Treat unparseable IDs as untrusted
+                logWarning(s"[TRUSTED POOL LOCAL] Cannot parse execId '$execId' - excluding")
+                -1
             }
           } else {
-            logWarning(s"[TRUSTED POOL] No numeric ID found in '$execId', treating as untrusted")
-            -1  // Treat non-numeric IDs as untrusted
+            logWarning(s"[TRUSTED POOL LOCAL] No numeric ID in '$execId' - excluding")
+            -1
           }
         }
-        
-        if (idNum >= 0) {
-          val isTrusted = idNum % modulo == 0
-          
-          if (!isTrusted) {
-            logWarning(s"[TRUSTED POOL] Executor $execId (ID=$idNum) EXCLUDED - not in trusted pool (ID % $modulo != 0)")
-            return true  // Exclude untrusted executors
-          } else {
-            // Executor is in trusted pool - allow it regardless of exclusion list
-            val wasExcluded = verifyTask.excludedExecutors.contains(execId)
-            if (wasExcluded) {
-              logWarning(s"[TRUSTED POOL] Executor $execId (ID=$idNum) ALLOWED - in trusted pool (overriding exclusion)")
-            } else {
-              logWarning(s"[TRUSTED POOL] Executor $execId (ID=$idNum) ALLOWED - in trusted pool")
-            }
-            return false  // Allow trusted executor
-          }
-        } else {
-          // Could not parse ID - exclude by default
-          logWarning(s"[TRUSTED POOL] Executor $execId EXCLUDED - could not parse ID")
+        if (idNum < 0) return true
+        val isTrusted = idNum % modulo == 0
+        if (!isTrusted) {
+          logWarning(s"[TRUSTED POOL LOCAL] Executor $execId (id=$idNum) EXCLUDED - not in modulo-$modulo pool")
           return true
+        } else {
+          val wasExcluded = verifyTask.excludedExecutors.contains(execId)
+          logWarning(s"[TRUSTED POOL LOCAL] Executor $execId (id=$idNum) ALLOWED - modulo-$modulo pool${if (wasExcluded) " (overrides replica exclusion)" else ""}")
+          return false
         }
       }
-      
-      // Local mode check - allow same-host scheduling if NOT in trusted pool mode
-      val isLocalMode = sched.sc.master.startsWith("local")
-      if (isLocalMode) {
-        logDebug(s"[VERIFICATION] Local mode detected - allowing verification on same host")
-        return false  // Don't block same-host scheduling in local mode
-      }
-      
-      // Normal exclusions: Check if this executor ran one of the original replicas
-      val isExcluded = verifyTask.excludedExecutors.contains(execId)
-      if (isExcluded) {
-        logDebug(s"[VERIFICATION] Executor $execId excluded for verification task $index (ran original replica)")
-        return true
-      }
-      
-      false  // Not excluded
-    } else {
-      false  // Normal tasks have no executor exclusions
+      // Local mode, no trusted pool: allow all executors
+      logDebug(s"[VERIFICATION] Local mode - allowing executor $execId")
+      return false
     }
+
+    // Cluster mode only: hostname-based trusted pool filtering
+    if (trustedVerifiersOnly) {
+      val trustedHostsStr = envOrElse("TRUSTED_VERIFIER_HOSTS", "")
+      val trustedHosts = trustedHostsStr.split(",").map(_.trim).filter(_.nonEmpty).toSet
+      if (trustedHosts.nonEmpty) {
+        val executorHost = sched.executorIdToHost.getOrElse(execId, "")
+        val isTrusted = trustedHosts.contains(executorHost)
+        if (!isTrusted) {
+          logWarning(s"[TRUSTED POOL CLUSTER] Executor $execId on '$executorHost' EXCLUDED - not in trusted hosts: $trustedHosts")
+          return true
+        } else {
+          val wasExcluded = verifyTask.excludedExecutors.contains(execId)
+          logWarning(s"[TRUSTED POOL CLUSTER] Executor $execId on '$executorHost' ALLOWED - trusted host${if (wasExcluded) " (overrides replica exclusion)" else ""}")
+          return false
+        }
+      } else {
+        logWarning(s"[TRUSTED POOL] TRUSTED_VERIFIERS_ONLY=true but TRUSTED_VERIFIER_HOSTS is empty - falling back to normal exclusion")
+      }
+    }
+
+    // Cluster mode, no trusted pool: exclude executors that ran original replicas
+    val isExcluded = verifyTask.excludedExecutors.contains(execId)
+    if (isExcluded) {
+      logDebug(s"[VERIFICATION] Executor $execId excluded - ran original replica")
+      return true
+    }
+    false
   }
 
   private[scheduler] val runningTasksSet = new HashSet[Long]
