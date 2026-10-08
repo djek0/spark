@@ -75,6 +75,37 @@ private[spark] class ShuffleMapTask(
     if (locs == null) Nil else locs.distinct
   }
 
+  /**
+   * Number of reduce partitions of this task's shuffle, recorded by runTask so that the
+   * result hash can read exactly that many block sizes. Transient: a deserialized copy starts
+   * at 0 ("unknown") until it runs.
+   */
+  @transient @volatile private[spark] var numReducePartitions: Int = 0
+
+  /**
+   * Block sizes hashed for replica consensus. Reads exactly numReducePartitions sizes:
+   * HighlyCompressedMapStatus (used above 2,000 reduce partitions) returns avgSize for any
+   * index and never throws, so reading "until ArrayIndexOutOfBounds" would never end.
+   * Falls back to the old read-until-exception loop only if the task has not run.
+   */
+  private[spark] def blockSizesForHash(status: MapStatus): Seq[Long] = {
+    if (numReducePartitions > 0) {
+      (0 until numReducePartitions).map(status.getSizeForBlock)
+    } else {
+      val builder = scala.collection.mutable.ArrayBuffer[Long]()
+      var idx = 0
+      try {
+        while (true) {
+          builder += status.getSizeForBlock(idx)
+          idx += 1
+        }
+      } catch {
+        case _: ArrayIndexOutOfBoundsException => // end of the sizes array
+      }
+      builder.toSeq
+    }
+  }
+
   override def runTask(context: TaskContext): MapStatus = {
     // Deserialize the RDD using the broadcast variable.
     val threadMXBean = ManagementFactory.getThreadMXBean
@@ -92,6 +123,7 @@ private[spark] class ShuffleMapTask(
 
     val rdd = rddAndDep._1
     val dep = rddAndDep._2
+    numReducePartitions = dep.partitioner.numPartitions
     // While we use the old shuffle fetch protocol, we use partitionId as mapId in the
     // ShuffleBlockId construction.
     val mapId = if (SparkEnv.get.conf.get(config.SHUFFLE_USE_OLD_FETCH_PROTOCOL)) {

@@ -1015,19 +1015,8 @@ object TaskResultVerificationManager extends Logging {
               // For ShuffleMapTask: Use block size hashing (same as Executor.scala)
               val driverHash = if (task.isInstanceOf[ShuffleMapTask]) {
                 val mapStatus = driverResult.asInstanceOf[MapStatus]
-                val blockSizes = {
-                  val builder = scala.collection.mutable.ArrayBuffer[Long]()
-                  var idx = 0
-                  try {
-                    while (true) {
-                      builder += mapStatus.getSizeForBlock(idx)
-                      idx += 1
-                    }
-                  } catch {
-                    case _: ArrayIndexOutOfBoundsException => // Expected - marks end of array
-                  }
-                  builder.toSeq
-                }
+                // Exactly one size per reduce partition (see ShuffleMapTask.blockSizesForHash)
+                val blockSizes = task.asInstanceOf[ShuffleMapTask].blockSizesForHash(mapStatus)
                 val sizeString = blockSizes.mkString(",")
                 logInfo(s"[DRIVER SHUFFLE HASH] Hashing ${blockSizes.length} block sizes: ${sizeString.take(200)}...")
                 computeTaskResultHash(ByteBuffer.wrap(sizeString.getBytes("UTF-8")))

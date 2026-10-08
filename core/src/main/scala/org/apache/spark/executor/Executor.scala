@@ -783,22 +783,8 @@ private[spark] class Executor(
           // MapStatus includes BlockManagerId which is non-deterministic
           val mapStatus = value.asInstanceOf[MapStatus]
           
-          // Collect all block sizes
-          // Strategy: Iterate until we hit an out-of-bounds (exception happens once)
-          // For typical jobs (< 10k partitions), this is faster than alternatives
-          val blockSizes = {
-            val builder = scala.collection.mutable.ArrayBuffer[Long]()
-            var idx = 0
-            try {
-              while (true) {
-                builder += mapStatus.getSizeForBlock(idx)
-                idx += 1
-              }
-            } catch {
-              case _: ArrayIndexOutOfBoundsException => // Expected - marks end of array
-            }
-            builder.toSeq
-          }
+          // Exactly one size per reduce partition (see ShuffleMapTask.blockSizesForHash)
+          val blockSizes = task.asInstanceOf[ShuffleMapTask].blockSizesForHash(mapStatus)
           val sizeString = blockSizes.mkString(",")
           logInfo(s"[SHUFFLE HASH] Task $taskId hashing ${blockSizes.length} block sizes: ${sizeString.take(200)}...")
           TaskResultVerificationManager.computeTaskResultHash(
