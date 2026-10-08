@@ -678,9 +678,10 @@ object TaskResultVerificationManager extends Logging {
     pendingVerifications.get(partitionKey) match {
       case Some((index1, index2)) =>
         logInfo(s"[THIRD-EXECUTOR] Verification task for stage $stageId, partition $partitionId completed")
-        // Process the result immediately
-        handleThirdExecutorResult(stageId, index1, index2, partitionId, result)
+        // Remove the key BEFORE handling: on NEITHER_MATCH the handler resubmits a full-task
+        // retry, which re-registers this key; removing it afterwards would drop the retry's verdict.
         pendingVerifications.remove(partitionKey)
+        handleThirdExecutorResult(stageId, index1, index2, partitionId, result)
       case None =>
         logWarning(s"[THIRD-EXECUTOR] No pending verification found for stage $stageId, partition $partitionId")
     }
