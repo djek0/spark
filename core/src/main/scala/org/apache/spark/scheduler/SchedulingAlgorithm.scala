@@ -30,7 +30,9 @@ private[spark] class FIFOSchedulingAlgorithm extends SchedulingAlgorithm {
   override def comparator(s1: Schedulable, s2: Schedulable): Boolean = {
     val priority1 = s1.priority
     val priority2 = s2.priority
-    var res = math.signum(priority1 - priority2)
+    // Integer.compare instead of signum(p1 - p2): aux TaskSets use Int.MinValue, and
+    // Int.MinValue - jobId overflows to a positive number for jobId >= 1.
+    var res = Integer.compare(priority1, priority2)
     if (res == 0) {
       val stageId1 = s1.stageId
       val stageId2 = s2.stageId
