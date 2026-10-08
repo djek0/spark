@@ -644,12 +644,16 @@ object TaskResultVerificationManager extends Logging {
     // This prevents verification TaskSet completion from removing the original TaskSet from pool
     val verificationStageAttemptId = 1000000 + task.partitionId
     
+    val verificationProperties = new java.util.Properties()
+    verificationProperties.putAll(task.localProperties.asInstanceOf[java.util.Map[_, _]])
+    verificationProperties.setProperty("spark.internal.task.type", "verification")
+
     val verificationTaskSet = new TaskSet(
       tasks = Array(verificationTask),
       stageId = task.stageId,  // Use ORIGINAL stageId to stay part of the same stage
       stageAttemptId = verificationStageAttemptId,  // Unique attempt ID for verification
       priority = Int.MinValue,  // Highest priority - prioritise verification tasks to complete first
-      properties = task.localProperties,
+      properties = verificationProperties,
       resourceProfileId = 0,  // Default resource profile
       isAuxiliary = true  // Mark as auxiliary to prevent zombie conflicts
     )
@@ -1304,12 +1308,15 @@ object TaskResultVerificationManager extends Logging {
           // Merkle TaskSets use stageAttemptId = 2000000 + partitionId
           val merkleStageAttemptId = 2000000 + partitionId
           
+          val merkleProperties = new java.util.Properties()
+          merkleProperties.setProperty("spark.internal.task.type", "verification")
+
           val taskSet = new TaskSet(
             tasks = Array(task1, task2),
             stageId = stageId,  // Use ORIGINAL stageId to stay part of the same stage
             stageAttemptId = merkleStageAttemptId,  // Unique attempt ID for Merkle
             priority = Int.MinValue,  // Highest priority - prioritise Merkle tasks to complete first
-            properties = new java.util.Properties(),
+            properties = merkleProperties,
             resourceProfileId = 0,
             isAuxiliary = true  // Mark as auxiliary to prevent zombie conflicts
           )

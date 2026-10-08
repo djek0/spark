@@ -320,21 +320,12 @@ private[spark] class Executor(
     val tr = new TaskRunner(context, taskDescription, plugins)
     runningTasks.put(taskDescription.taskId, tr)
     logInfo(s"[VERIFICATION ROUTING] 1. Launching task ${taskDescription.taskId}")
-    // Check if this is a verification task by peeking at the serialized task class
-    // We duplicate the ByteBuffer to avoid consuming it (TaskRunner will deserialize again)
-    val isVerificationTask = try {
-      val duplicatedBuffer = taskDescription.serializedTask.duplicate()
-      val taskSetManager = env.closureSerializer.newInstance()
-      val task = taskSetManager.deserialize[Task[Any]](
-        duplicatedBuffer, Thread.currentThread.getContextClassLoader)
-      val taskClassName = task.getClass.getName
-      logInfo(s"[VERIFICATION ROUTING] 2. Task ${taskDescription.taskId} is ${taskClassName}")
-      taskClassName.contains("MerkleTreeBuildTask") || taskClassName.contains("VerificationTask")
-    } catch {
-      case e: Exception =>
-        logInfo(s"[VERIFICATION ROUTING] 3. Failed to peek at task type for ${taskDescription.taskId}, routing to normal pool")
-        false
-    }
+    // Identify verification tasks via a lightweight property flag stamped on the TaskSet
+    // (avoids deserializing the task on the message-handler thread which can trigger
+    //  TorrentBroadcast.readBroadcastBlock and crash the JVM with a fatal Error)
+    val isVerificationTask =
+      taskDescription.properties.getProperty("spark.internal.task.type", "") == "verification"
+    logInfo(s"[VERIFICATION ROUTING] 2. Task ${taskDescription.taskId} isVerification=$isVerificationTask")
     
     if (isVerificationTask && verificationThreadPool.isDefined) {
       logInfo(s"[VERIFICATION ROUTING] 4. Task ${taskDescription.taskId} routed to DEDICATED verification pool")
@@ -696,10 +687,17 @@ private[spark] class Executor(
         
         // Byzantine selection: Simple partition-based + index-based selection
         // No trusted worker concept needed since verification tasks run on separate pool
+        val isLocalMode = env.conf.get("spark.master", "local").startsWith("local")
         val shouldBeByzantine = if (byzantineInterval > 0 && !isVerificationTask) {
-          // Byzantine on specific partitions AND only first replica (index % 2 == 0)
-          // This ensures only ONE replica per partition is Byzantine
-          (task.partitionId % byzantineInterval == 0) && (taskIndex % 2 == 0)
+          if (isLocalMode) {
+            // Local mode: both replicas may land on same executor (isRelativeOnSameNode is disabled)
+            // Only corrupt first replica (even index) so there is always one honest replica to compare against
+            (task.partitionId % byzantineInterval == 0) && (taskIndex % 2 == 0)
+          } else {
+            // Cluster mode: isRelativeOnSameNode now correctly enforces replica separation across hosts,
+            // so corrupt all matching partitions regardless of replica index
+            task.partitionId % byzantineInterval == 0
+          }
         } else {
           false  // Honest mode or verification task
         }

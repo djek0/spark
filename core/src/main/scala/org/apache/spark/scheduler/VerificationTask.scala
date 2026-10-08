@@ -205,7 +205,14 @@ private[spark] class VerificationTask(
         // Start timer for full-task verification
         val fullTaskStartTime = System.nanoTime()
         
-        val result = originalTask.runTask(context)
+        val result = try {
+          originalTask.runTask(context)
+        } catch {
+          case t: Throwable =>
+            logWarning(s"[VERIFICATION] originalTask.runTask failed for partition $partitionId: ${t.getMessage}")
+            return VerificationVerdict(stageId, partitionId, replicaIndex1, replicaIndex2,
+              "ERROR", replicaHash1, replicaHash2, "NEITHER_MATCH")
+        }
         
         // Log full-task verification time
         val fullTaskTime = (System.nanoTime() - fullTaskStartTime) / 1e9

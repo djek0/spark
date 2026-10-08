@@ -168,12 +168,11 @@ private[spark] class TaskSetManager(
       return false  // Don't block same-host scheduling in local mode
     }
 
-    if(stage_id >= 0) {
-      if (taskIndexToHost.contains(stage_id)) {
-        if ((index % 2 == 0 && taskIndexToHost(stage_id).contains(index + 1) && taskIndexToHost(stage_id)(index + 1) == host) ||
-          (index % 2 == 1 && taskIndexToHost(stage_id).contains(index - 1) && taskIndexToHost(stage_id)(index - 1) == host)) {
-          return true
-        }
+    val lookupId = taskSet.stageId
+    if (taskIndexToHost.contains(lookupId)) {
+      if ((index % 2 == 0 && taskIndexToHost(lookupId).contains(index + 1) && taskIndexToHost(lookupId)(index + 1) == host) ||
+        (index % 2 == 1 && taskIndexToHost(lookupId).contains(index - 1) && taskIndexToHost(lookupId)(index - 1) == host)) {
+        return true
       }
     }
     false

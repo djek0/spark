@@ -154,7 +154,7 @@ private[spark] class TaskSchedulerImpl(
 
   protected val hostsByRack = new HashMap[String, HashSet[String]]
 
-  protected val executorIdToHost = new HashMap[String, String]
+  protected[scheduler] val executorIdToHost = new HashMap[String, String]
 
   private val abortTimer = new Timer("task-abort-timer", true)
   // Exposed for testing
