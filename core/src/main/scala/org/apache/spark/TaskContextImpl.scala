@@ -56,11 +56,15 @@ private[spark] class TaskContextImpl(
     // The default value is only used in tests.
     override val taskMetrics: TaskMetrics = TaskMetrics.empty,
     override val resources: Map[String, ResourceInformation] = Map.empty,
-    var targetElementId: Option[Long] = None)
+    var targetElementId: Option[Long] = None,
+    var targetRange: Option[(Long, Long)] = None)  // chunk verification: UIDs [lo, hi)
   extends TaskContext
   with Logging {
 
-  override def isVerificationTask: Boolean = targetElementId.isDefined
+  override def isVerificationTask: Boolean = targetElementId.isDefined || targetRange.isDefined
+
+  /** Chunk verification: the verifier's box for targetRange, filled at the logging level. */
+  @transient private[spark] var rangeBox: org.apache.spark.verification.RangeBox = null
   
   /**
    * Captured backup iterator value for verification tasks.

@@ -101,6 +101,17 @@ private[spark] class ResultTask[T, U](
     result
   }
 
+  /**
+   * Chunk verification: the stage's iterator for this partition, WITHOUT the action (func), so
+   * a partial action (take/first) cannot cut the chunk short and no result is produced.
+   */
+  private[spark] def iteratorForVerification(context: TaskContext): Iterator[T] = {
+    val ser = SparkEnv.get.closureSerializer.newInstance()
+    val (rdd, _) = ser.deserialize[(RDD[T], (TaskContext, Iterator[T]) => U)](
+      ByteBuffer.wrap(taskBinary.value), Thread.currentThread.getContextClassLoader)
+    rdd.iterator(partition, context)
+  }
+
   // This is only callable on the driver side.
   override def preferredLocations: Seq[TaskLocation] = preferredLocs
 

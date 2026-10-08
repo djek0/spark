@@ -9,6 +9,7 @@ import scala.util.Properties.envOrElse
 import scala.collection.concurrent.TrieMap
 import scala.collection.mutable.{HashMap, HashSet}
 import org.apache.spark.internal.Logging
+import scala.util.control.NonFatal
 import org.apache.spark.{TaskContext, TaskContextImpl}
 import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.util.FileFormatUtils
@@ -581,7 +582,17 @@ object TaskResultVerificationManager extends Logging {
             logInfo(s"[VERIFICATION] Stage $stageId is intermediate - using FULL-TASK verification")
           }
           
-          if (shouldUseMerkle) {
+          if (shouldUseMerkle && ChunkConfig.useChunks) {
+            // Chunk mode: localize with the replicas' digests (no tree round), then one verifier
+            // recomputes only that chunk; anything unsure goes to full-task
+            chunkLocalize(stageId, index1, index2, partitionId) match {
+              case Some((lo, hi, boxA, boxB)) =>
+                submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler,
+                  targetRange = Some((lo, hi)), chunkBoxes = Some((boxA, boxB)))
+              case None =>
+                submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
+            }
+          } else if (shouldUseMerkle) {
             logInfo(s"[VERIFICATION] Stage $stageId is final - using MERKLE verification")
             logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: ✓ Proceeding with MERKLE verification")
             // Step 1: Build Merkle trees and find disagreeing UID + per-tree leaf hashes
@@ -658,9 +669,12 @@ object TaskResultVerificationManager extends Logging {
       excludedExecutors: Set[String],
       taskScheduler: TaskScheduler,
       targetElementId: Option[Long] = None,
-      merkleLeafHashes: Option[(Int, Int)] = None): Unit = {
+      merkleLeafHashes: Option[(Int, Int)] = None,
+      targetRange: Option[(Long, Long)] = None,
+      chunkBoxes: Option[(Long, Long)] = None): Unit = {
 
-    val modeStr = targetElementId.map(id => s"single-element (UID $id)").getOrElse("full-task")
+    val modeStr = targetRange.map { case (lo, hi) => s"chunk (UIDs [$lo, $hi))" }
+      .orElse(targetElementId.map(id => s"single-element (UID $id)")).getOrElse("full-task")
     logInfo(s"[THIRD-EXECUTOR] Creating verification task (excluding: $excludedExecutors) - mode: $modeStr")
 
     // Get replica hashes to pass to executor
@@ -696,7 +710,9 @@ object TaskResultVerificationManager extends Logging {
         .serialize(TaskMetrics.registered).array(),
       jobId = task.jobId,
       appId = task.appId,
-      appAttemptId = task.appAttemptId
+      appAttemptId = task.appAttemptId,
+      targetRange = targetRange,
+      chunkBoxes = chunkBoxes
     )
 
     // Wrap in TaskSet with single task
@@ -866,7 +882,14 @@ object TaskResultVerificationManager extends Logging {
       logInfo(s"[DRIVER] Stage $stageId involves shuffle operations - delegating to executor")
     }
 
-    if (shouldUseMerkle) {
+    if (shouldUseMerkle && ChunkConfig.useChunks) {
+      chunkLocalize(stageId, index1, index2, partitionId) match {
+        case Some((lo, hi, boxA, boxB)) =>
+          executeChunkOnDriver(stageId, index1, index2, partitionId, lo, hi, boxA, boxB)
+        case None =>
+          executeOnDriver(stageId, index1, index2, partitionId, None, None)
+      }
+    } else if (shouldUseMerkle) {
       logInfo(s"[DRIVER] Stage $stageId is final - using MERKLE verification")
       // Build Merkle trees and find disagreeing UID + per-tree leaf hashes
       val disagreement = buildMerkleTreesAndFindDisagreement(stageId, index1, index2, partitionId, taskScheduler)
@@ -935,6 +958,91 @@ object TaskResultVerificationManager extends Logging {
       } else {
         executeOnDriver(stageId, index1, index2, partitionId, None, None)
       }
+    }
+  }
+
+  /**
+   * Chunk mode: the first differing chunk of the two replicas' digests, as (lo, hi, box of index1,
+   * box of index2), or None when it cannot be localized (a digest is missing, invalid or equal, or
+   * the difference lies in a partly read stream); the caller then uses full-task verification.
+   */
+  private def chunkLocalize(stageId: Int, index1: Int, index2: Int,
+      partitionId: Int): Option[(Long, Long, Long, Long)] = {
+    val a = chunkDigests.get((stageId, index1))
+    val b = chunkDigests.get((stageId, index2))
+    val r = for (x <- a; y <- b; d <- ChunkDigest.firstDifference(x, y)) yield d
+    logWarning(s"[CHUNK] stage $stageId partition $partitionId: " + (r match {
+      case Some((lo, hi, _, _)) => s"first differing chunk = UIDs [$lo, $hi)"
+      case None =>
+        val why = if (a.isEmpty || b.isEmpty) "digest missing" else "equal/invalid/partial"
+        s"no chunk ($why) -> full-task"
+    }))
+    r
+  }
+
+  /**
+   * Chunk mode on the driver: recompute only UIDs [lo, hi) up to the logging level and compare the
+   * box with both replicas' boxes. Never posts NEITHER_MATCH: an unsure result goes to the existing
+   * full-task driver path, which commits a full result.
+   */
+  private def executeChunkOnDriver(stageId: Int, index1: Int, index2: Int, partitionId: Int,
+      lo: Long, hi: Long, boxA: Long, boxB: Long): Unit = {
+    val rt = stageIndexToOriginalTask.get((stageId, index1))
+      .orElse(stageIndexToOriginalTask.get((stageId, index2))) match {
+      case Some(r: ResultTask[_, _]) => r
+      case _ =>
+        executeOnDriver(stageId, index1, index2, partitionId, None, None)
+        return
+    }
+    val tmm = new org.apache.spark.memory.TaskMemoryManager(SparkEnv.get.memoryManager, -1L)
+    val ctx = new TaskContextImpl(
+      stageId = rt.stageId,
+      stageAttemptNumber = rt.stageAttemptId,
+      partitionId = rt.partitionId,
+      taskAttemptId = -1L,
+      attemptNumber = 0,
+      taskIndex = index1,
+      taskMemoryManager = tmm,
+      localProperties = rt.localProperties,
+      metricsSystem = SparkEnv.get.metricsSystem,
+      taskMetrics = TaskMetrics.empty,
+      resources = Map.empty,
+      targetRange = Some((lo, hi)))
+    ctx.rangeBox = new org.apache.spark.verification.RangeBox(lo, hi)
+    val t0 = System.nanoTime()
+    val v: Option[Long] =
+      try {
+        TaskContext.setTaskContext(ctx)
+        val it = rt.iteratorForVerification(ctx)
+        while (it.hasNext) it.next()
+        Some(ctx.rangeBox.sum)
+      } catch {
+        case NonFatal(e) =>
+          logWarning(s"[CHUNK] driver chunk check failed: ${e.getMessage}")
+          None
+      } finally {
+        try ctx.markTaskCompleted(None) catch {
+          case NonFatal(e) => logWarning(s"[CHUNK] completion listeners failed: ${e.getMessage}")
+        }
+        TaskContext.unset()
+        try tmm.cleanUpAllAllocatedMemory() catch {
+          case NonFatal(e) => logWarning(s"[CHUNK] memory cleanup failed: ${e.getMessage}")
+        }
+      }
+    logWarning(s"[PERF-CHUNK-VERIFY-DRIVER] Stage $stageId partition $partitionId: " +
+      s"${(System.nanoTime() - t0) / 1e9}s (UIDs [$lo, $hi), ${ctx.rangeBox.count} outputs)")
+    v match {
+      case Some(x) if x == boxA && x != boxB =>
+        logWarning(s"[VERDICT] Replica 1 (idx$index1) is CORRECT, Replica 2 (idx$index2) is BYZANTINE")
+        postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, "REPLICA_1_CORRECT", None)
+        cleanupPartitionTasks(stageId, index1, index2)
+      case Some(x) if x == boxB && x != boxA =>
+        logWarning(s"[VERDICT] Replica 2 (idx$index2) is CORRECT, Replica 1 (idx$index1) is BYZANTINE")
+        postVerdictAndRetryCleanup(stageId, index1, index2, partitionId, "REPLICA_2_CORRECT", None)
+        cleanupPartitionTasks(stageId, index1, index2)
+      case _ =>
+        logWarning(s"[CHUNK] driver chunk check inconclusive -> full-task on the driver")
+        executeOnDriver(stageId, index1, index2, partitionId, None, None)
     }
   }
 

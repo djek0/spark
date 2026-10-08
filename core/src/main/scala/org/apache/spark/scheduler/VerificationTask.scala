@@ -20,6 +20,7 @@ package org.apache.spark.scheduler
 import java.util.Properties
 import org.apache.spark._
 import org.apache.spark.internal.Logging
+import scala.util.control.NonFatal
 
 /**
  * Result of a Byzantine verification task.
@@ -89,7 +90,9 @@ private[spark] class VerificationTask(
     serializedTaskMetrics: Array[Byte],
     jobId: Option[Int] = None,
     appId: Option[String] = None,
-    appAttemptId: Option[String] = None)
+    appAttemptId: Option[String] = None,
+    val targetRange: Option[(Long, Long)] = None,  // chunk verification: UIDs [lo, hi)
+    val chunkBoxes: Option[(Long, Long)] = None)   // (box of replicaIndex1, box of replicaIndex2)
   extends Task[VerificationVerdict](
     stageId, 
     stageAttemptId, 
@@ -108,6 +111,8 @@ private[spark] class VerificationTask(
    * This ensures all verification logic runs on the executor, not the driver.
    */
   override def runTask(context: TaskContext): VerificationVerdict = {
+    if (targetRange.isDefined && chunkBoxes.isDefined) return runChunkVerification(context)
+
     val modeStr = targetElementId.map(id => s"single-element (UID $id)").getOrElse("full-task")
     logInfo(s"[VERIFICATION] Running verification task for partition $partitionId on executor ${context.taskAttemptId()} - mode: $modeStr")
     logInfo(s"[VERIFICATION] Excluded executors: $excludedExecutors")
@@ -259,6 +264,65 @@ private[spark] class VerificationTask(
           verdict = verdict
         )
     }
+  }
+
+  /**
+   * Chunk verification: recompute only the UIDs [lo, hi) up to the replicas' logging level, sum
+   * their terms into one box, and compare it with the two replicas' boxes for that chunk. The
+   * action (func) never runs. Anything unsure returns NEITHER_MATCH, which the driver turns into
+   * a full-task retry; it is never committed.
+   */
+  private def runChunkVerification(context: TaskContext): VerificationVerdict = {
+    val (lo, hi) = targetRange.get
+    val (boxA, boxB) = chunkBoxes.get
+    val rangeCtx = new TaskContextImpl(
+      stageId = context.stageId(),
+      stageAttemptNumber = context.stageAttemptNumber(),
+      partitionId = context.partitionId(),
+      taskAttemptId = context.taskAttemptId(),
+      attemptNumber = context.attemptNumber(),
+      taskIndex = context.taskIndex(),
+      taskMemoryManager = context.taskMemoryManager(),
+      localProperties = localProperties,
+      metricsSystem = SparkEnv.get.metricsSystem,
+      taskMetrics = context.taskMetrics(),
+      resources = context.resources(),
+      targetRange = Some((lo, hi)))
+    rangeCtx.rangeBox = new org.apache.spark.verification.RangeBox(lo, hi)
+    val t0 = System.nanoTime()
+    val verifierBox: Option[Long] =
+      try {
+        TaskContext.setTaskContext(rangeCtx)
+        originalTask match {
+          case rt: ResultTask[_, _] =>
+            val it = rt.iteratorForVerification(rangeCtx)
+            while (it.hasNext) it.next()  // drain the chunk; no action runs
+            Some(rangeCtx.rangeBox.sum)
+          case _ =>
+            None  // map stages are not chunk-eligible yet
+        }
+      } catch {
+        case NonFatal(e) =>
+          // Never fail the aux task: that would abort the real stage
+          logWarning(s"[CHUNK] verification failed for partition $partitionId: ${e.getMessage}")
+          None
+      } finally {
+        try rangeCtx.markTaskCompleted(None) catch {
+          case NonFatal(e) => logWarning(s"[CHUNK] completion listeners failed: ${e.getMessage}")
+        }
+        TaskContext.setTaskContext(context)
+      }
+    logWarning(s"[PERF-CHUNK-VERIFY] Stage $stageId partition $partitionId: " +
+      s"${(System.nanoTime() - t0) / 1e9}s (UIDs [$lo, $hi), ${rangeCtx.rangeBox.count} outputs)")
+    val verdict = verifierBox match {
+      case Some(v) if v == boxA && v != boxB => "REPLICA_1_CORRECT"
+      case Some(v) if v == boxB && v != boxA => "REPLICA_2_CORRECT"
+      case _ => "NEITHER_MATCH"
+    }
+    logWarning(s"[VERIFICATION] Chunk verdict: $verdict (verifier=${verifierBox.getOrElse("ERROR")} " +
+      s"vs replica1=$boxA vs replica2=$boxB)")
+    VerificationVerdict(stageId, partitionId, replicaIndex1, replicaIndex2,
+      verifierBox.map(_.toString).getOrElse("ERROR"), boxA.toString, boxB.toString, verdict)
   }
 
   /**

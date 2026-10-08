@@ -448,6 +448,14 @@ abstract class RDD[T: ClassTag](
               Trace.restoreBackupQueue()
               
               context match {
+                case ctx: TaskContextImpl if ctx.targetRange.isDefined && ctx.rangeBox != null =>
+                  // Chunk verification: fingerprint the chunk where the replicas logged
+                  backupIt.map { elem =>
+                    val uid = Trace.dequeueUid()
+                    ctx.rangeBox.add(uid, elem)
+                    elem
+                  }
+
                 case ctx: TaskContextImpl if ctx.targetElementId.isDefined =>
                   // Single-element verification: value already captured at stage root
                   // Just flow the iterator through, updating the captured value with final transformation
@@ -508,9 +516,20 @@ abstract class RDD[T: ClassTag](
               it
 
             case None if context.isVerificationTask =>
-              // Verification task with no backup iterator: just return iterator
-              logDebug(s"[VERIFICATION] No backup iterator for verification task, returning iterator")
-              it
+              context match {
+                case ctx: TaskContextImpl if ctx.targetRange.isDefined && ctx.rangeBox != null =>
+                  // Chunk verification of a stage that is only a collapser root: the replicas
+                  // logged at `it` (Case A), so fingerprint the chunk there
+                  it.map { elem =>
+                    val uid = Trace.dequeueUid()
+                    ctx.rangeBox.add(uid, elem)
+                    elem
+                  }
+                case _ =>
+                  // Verification task with no backup iterator: just return iterator
+                  logDebug(s"[VERIFICATION] No backup iterator for verification task, returning iterator")
+                  it
+              }
 
             case None =>
               // Normal task with no backup iterator: write UNSAFE_STAGE marker
@@ -588,6 +607,20 @@ abstract class RDD[T: ClassTag](
 
         // Check if this is a verification task
         context match {
+          case ctx: TaskContextImpl if ctx.targetRange.isDefined =>
+            // Chunk verification: same UID counter and order as the replicas, but only UIDs in
+            // [lo, hi) are passed on (and enqueued) downstream
+            val (lo, hi) = ctx.targetRange.get
+            baseIter.flatMap { value =>
+              val uid = Trace.generateUid()
+              if (uid >= lo && uid < hi) {
+                Trace.enqueueUid(uid)
+                Some(value)
+              } else {
+                None
+              }
+            }
+
           case ctx: TaskContextImpl if ctx.targetElementId.isDefined =>
             val isVerificationTask = ctx.isVerificationTask
             val targetId = ctx.targetElementId.get
