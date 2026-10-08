@@ -398,31 +398,42 @@ abstract class RDD[T: ClassTag](
         if (!Trace.isCorrelationBroken && !context.isVerificationTask) {
           // Case A: All transformations safe - log with outermost iterator
           // No collapser encountered, queue is in correct state
-          val outWriter = Trace.createOutputWriter(
-            stageId = context.stageId,
-            partitionId = split.index,
-            taskIndex = context.taskIndex(),
-            appName = appName
-          )
-          Option(context).foreach { ctx =>
-            ctx.addTaskCompletionListener[Unit](_ => try outWriter.safeClose() catch {
-              case _: Throwable => ()
-            })
-          }
+          // The chunk digest (null in trees mode) is filled at the same point and with the
+          // same UID as the finals file.
+          val digest = org.apache.spark.verification.ChunkConfig.newDigest(context)
+          val outWriter =
+            if (org.apache.spark.verification.ChunkConfig.writeTraceFiles) {
+              val w = Trace.createOutputWriter(
+                stageId = context.stageId,
+                partitionId = split.index,
+                taskIndex = context.taskIndex(),
+                appName = appName
+              )
+              Option(context).foreach { ctx =>
+                ctx.addTaskCompletionListener[Unit](_ => try w.safeClose() catch {
+                  case _: Throwable => ()
+                })
+              }
+              w
+            } else null
 
           logInfo(s"[UID TRACKING] Logging with outermost iterator (all transformations safe)")
 
-          // Wrap the outermost iterator for logging
-          it.map { elem =>
-            Trace.logOutput(
-              writer = outWriter,
-              stageId = context.stageId,
-              partitionId = split.index,
-              taskId = context.taskAttemptId(),
-              attempt = context.attemptNumber,
-              value = elem
-            )
-            elem
+          // Wrap the outermost iterator for logging: one UID dequeue per element, exactly as
+          // Trace.logOutput does, then the finals record and/or the digest term.
+          new Iterator[T] {
+            override def hasNext: Boolean = {
+              val h = it.hasNext
+              if (!h && digest != null) digest.exhausted = true
+              h
+            }
+            override def next(): T = {
+              val elem = it.next()
+              val uid = Trace.dequeueUid()
+              if (digest != null) digest.add(uid, elem)
+              if (outWriter != null) outWriter.writeEntry(uid, elem)
+              elem
+            }
           }
         } else {
           // Case B: Correlation broken - use backup iterator or UNSAFE_STAGE

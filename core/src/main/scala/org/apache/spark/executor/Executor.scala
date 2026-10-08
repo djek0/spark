@@ -952,7 +952,12 @@ private[spark] class Executor(
           honestHash // Return honest hash
         }
         
-        metricPeaks = metricPeaks :+ hashValueCandidate
+        // Chunk digest block (empty when the task has no digest) goes before the hash, so the
+        // hash stays last. The digest is corrupted for exactly the replica whose hash is.
+        val chunkBlock = org.apache.spark.verification.ChunkConfig.trailerFor(
+          task.context,
+          corruptForTest = honestFlag == "False" && shouldBeByzantine && !isVerificationTask)
+        metricPeaks = metricPeaks ++ chunkBlock :+ hashValueCandidate
         // TODO: do not serialize value twice
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)
         val serializedDirectResult = ser.serialize(directResult)

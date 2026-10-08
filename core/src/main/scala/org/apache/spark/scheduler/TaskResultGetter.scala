@@ -74,6 +74,10 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
               directResult.value(taskResultSerializer.get())
               val hashSize: Long = directResult.metricPeaks(directResult.metricPeaks.length-1)
               directResult.metricPeaks = directResult.metricPeaks.take(directResult.metricPeaks.length-1)
+              // Chunk digest block (if any) sits right before the hash
+              val (chunkDigest, peaksWithoutDigest) =
+                org.apache.spark.verification.ChunkDigest.fromTrailer(directResult.metricPeaks)
+              directResult.metricPeaks = peaksWithoutDigest
 //              logInfo("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
 //              logInfo(s"[EXTRA LOG][TASK RESULT GETTER] deserialized result: for task ${tid}")
 
@@ -86,6 +90,8 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
               task match {
                 case _: ResultTask[_, _] | _: ShuffleMapTask =>
                   logInfo("Calling addNewResultTasks from task verification manager")
+                  // Digest before hash: whoever sees the hash also sees the digest
+                  chunkDigest.foreach(TaskResultVerificationManager.storeChunkDigest(tid, _))
                   TaskResultVerificationManager.addNewResultForTid(tid, hashSize.toString)
                 case _ =>
                   logDebug(s"[VERIFICATION] Skipping adding result hash for verification task ${task.getClass.getSimpleName} (taskId=$tid)")
@@ -123,11 +129,16 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
               // Store hash for IndirectTaskResult as well (for large results)
               val hashSize: Long = deserializedResult.metricPeaks(deserializedResult.metricPeaks.length-1)
               deserializedResult.metricPeaks = deserializedResult.metricPeaks.take(deserializedResult.metricPeaks.length-1)
+              val (chunkDigest, peaksWithoutDigest) =
+                org.apache.spark.verification.ChunkDigest.fromTrailer(deserializedResult.metricPeaks)
+              deserializedResult.metricPeaks = peaksWithoutDigest
               val taskInfo = taskSetManager.taskInfos(tid)
               val task = taskSetManager.tasks(taskInfo.index)
               task match {
                 case _: ResultTask[_, _] | _: ShuffleMapTask =>
                   logInfo(s"[INDIRECT] Calling addNewResultTasks for large result (TID $tid)")
+                  // Digest before hash: whoever sees the hash also sees the digest
+                  chunkDigest.foreach(TaskResultVerificationManager.storeChunkDigest(tid, _))
                   TaskResultVerificationManager.addNewResultForTid(tid, hashSize.toString)
                 case _ =>
                   logDebug(s"[VERIFICATION] Skipping adding result hash for verification task ${task.getClass.getSimpleName} (taskId=$tid)")

@@ -13,6 +13,7 @@ import org.apache.spark.{TaskContext, TaskContextImpl}
 import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.util.FileFormatUtils
 import org.apache.spark.rdd.UnsafeStageMarkers
+import org.apache.spark.verification.{ChunkConfig, ChunkDigest, DigestView}
 
 
 object TaskResultVerificationManager extends Logging {
@@ -49,6 +50,9 @@ object TaskResultVerificationManager extends Logging {
   private val consensusFound = new scala.collection.mutable.HashSet[(Int, Int)]()
   // Track partitions that have retried with full-task verification after NEITHER_MATCH
   private val stagePartitionFullTaskRetry = new scala.collection.mutable.HashSet[(Int, Int)]()
+  // Chunk digests of replica results, keyed (stageId, taskIndex). Written by TaskResultGetter
+  // threads, read and removed on the DAG thread, hence concurrent.
+  private val chunkDigests = new TrieMap[(Int, Int), DigestView]()
 
   // Sealed trait for Merkle tree build outcomes
   private sealed trait MerkleBuildOutcome
@@ -194,6 +198,10 @@ object TaskResultVerificationManager extends Logging {
     // Remove executor mappings
     stageIndexToExecutor.remove(stageIndex1)
     stageIndexToExecutor.remove(stageIndex2)
+
+    // Remove chunk digests
+    chunkDigests.remove(stageIndex1)
+    chunkDigests.remove(stageIndex2)
     
     logDebug(s"[CLEANUP] Removed task references for stage $stageId, indexes $index1 and $index2")
   }
@@ -212,6 +220,8 @@ object TaskResultVerificationManager extends Logging {
     // Post the verdict
     dagScheduler.eventProcessLoop.post(
       VerificationVerdictEvent(stageId, index1, index2, partitionId, verdict, verifierResult))
+    chunkDigests.remove((stageId, index1))
+    chunkDigests.remove((stageId, index2))
     
     // Retry cleanup in case this was the last pending verification for the stage
     logInfo(s"[CLEANUP] Verdict posted for stage $stageId partition $partitionId - retrying stage cleanup")
@@ -272,6 +282,9 @@ object TaskResultVerificationManager extends Logging {
     // Remove all consensus flags for this stage
     val consensusToRemove = consensusFound.filter(_._1 == stageId).toList
     consensusToRemove.foreach(consensusFound.remove)
+
+    // Remove all chunk digests for this stage
+    chunkDigests.keys.filter(_._1 == stageId).toList.foreach(chunkDigests.remove)
     
     // Remove all Merkle tree build results for this stage (taskIds contain stage info)
     // Note: merkleTreeBuildResults uses taskId as key, need to clean based on tidToStageIndexInfo
@@ -291,6 +304,37 @@ object TaskResultVerificationManager extends Logging {
     } else {
       logInfo(s"[HASH STORE] Task $tid not found in running tasks, cannot store result hash")
     }
+  }
+
+  /** Store a replica's chunk digest. Called by TaskResultGetter threads, like addNewResultForTid. */
+  def storeChunkDigest(tid: Long, d: DigestView): Unit =
+    tidToStageIndexInfo.get(tid).foreach(si => chunkDigests.put(si, d))
+
+  /** Shadow mode: log whether the two replicas' digests agree, at consensus. */
+  private def logShadowConsensus(stageId: Int, i1: Int, i2: Int): Unit = {
+    val eq = (chunkDigests.get((stageId, i1)), chunkDigests.get((stageId, i2))) match {
+      case (Some(a), Some(b)) => ChunkDigest.sameDigest(a, b).toString
+      case _ => "missing"
+    }
+    logWarning(s"[CHUNK-SHADOW] consensus stage $stageId pair ${i1 / 2}: digestsEqual=$eq")
+  }
+
+  /** Shadow mode: log the chunk the digests point to, next to the UID the trees found. */
+  private def logShadowLocalization(stageId: Int, i1: Int, i2: Int, partitionId: Int,
+      tree: Option[(Long, Int, Int)]): Unit = {
+    val chunk = for {
+      a <- chunkDigests.get((stageId, i1))
+      b <- chunkDigests.get((stageId, i2))
+      r <- ChunkDigest.firstDifference(a, b)
+    } yield r
+    val treeUid = tree.collect { case (u, _, _) if u >= 0 => u }
+    val contains = (chunk, treeUid) match {
+      case (Some((lo, hi, _, _)), Some(u)) => (u >= lo && u < hi).toString
+      case _ => "n/a"
+    }
+    logWarning(s"[CHUNK-SHADOW] verify stage $stageId partition $partitionId: " +
+      s"chunk=${chunk.map(c => s"[${c._1},${c._2})").getOrElse("none")} " +
+      s"treeUid=${treeUid.getOrElse("none")} contains=$contains")
   }
 
   /**
@@ -360,6 +404,7 @@ object TaskResultVerificationManager extends Logging {
               // Normal mode: hashes match - consensus found
               logInfo(s"[+] CONSENSUS: Valid result for stage $stageId, partition $partitionId (indexes ${if (index % 2 == 0) s"$index, $partnerIndex" else s"$partnerIndex, $index"})")
               consensusFound.add((stageId, partitionId))
+              if (ChunkConfig.shadow) logShadowConsensus(stageId, index, partnerIndex)
               logInfo(s"[CONSENSUS FLAG] Set consensus flag for stage $stageId, partition $partitionId")
               // Remove from verificationInProgress since no verification needed (consensus reached)
               verificationInProgress.remove(partitionKey)
@@ -541,6 +586,7 @@ object TaskResultVerificationManager extends Logging {
             logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: ✓ Proceeding with MERKLE verification")
             // Step 1: Build Merkle trees and find disagreeing UID + per-tree leaf hashes
             val disagreement = buildMerkleTreesAndFindDisagreement(stageId, index1, index2, partitionId, taskScheduler)
+            if (ChunkConfig.shadow) logShadowLocalization(stageId, index1, index2, partitionId, disagreement)
 
             disagreement match {
               case Some((uid, correctIdx, byzantineIdx)) if uid == -1L =>
@@ -824,6 +870,7 @@ object TaskResultVerificationManager extends Logging {
       logInfo(s"[DRIVER] Stage $stageId is final - using MERKLE verification")
       // Build Merkle trees and find disagreeing UID + per-tree leaf hashes
       val disagreement = buildMerkleTreesAndFindDisagreement(stageId, index1, index2, partitionId, taskScheduler)
+      if (ChunkConfig.shadow) logShadowLocalization(stageId, index1, index2, partitionId, disagreement)
 
       disagreement match {
         case Some((uid, correctIdx, byzantineIdx)) if uid == -1L =>
