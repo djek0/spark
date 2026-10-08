@@ -1962,34 +1962,12 @@ private[spark] class DAGScheduler(
                   // Store both events for verdict-based selection
                   pendingVerificationResults((stageId, partitionId)) = (firstEvent, event)
 
-                  // Start timeout timer for verification (includes Merkle tree building in parallel)
-                  // Adaptive timeout based on result size: larger data = more time needed
-                  val baseTimeoutMs = sc.getConf.get("spark.verification.timeout", "20000").toInt
-                  val capMultiplier = sc.getConf.get("spark.verification.timeout.cap", "10.0").toDouble
-                  val timeoutMs = try {
-                    // Get size from DirectTaskResult
-                    val resultSizeBytes = firstEvent.result match {
-                      case directResult: DirectTaskResult[_] =>
-                        directResult.valueBytes.remaining().toLong
-                      case _ => 0L
-                    }
-                    val sizeMB = resultSizeBytes.toDouble / (1024 * 1024)
-                    
-                    // Adaptive scaling: 1.0 + (sizeMB / 100), cap at configurable multiplier
-                    // Full task recomputation scales with data size
-                    // Default cap 10.0x: 100MB = 2.0x (40s), 1GB = 10.0x (200s max)
-                    val sizeMultiplier = math.max(1.0, math.min(capMultiplier, 1.0 + (sizeMB / 100.0)))
-                    val adaptiveTimeout = (baseTimeoutMs * sizeMultiplier).toInt
-                    
-                    logInfo(s"[ADAPTIVE TIMEOUT] Result size: ${sizeMB}MB, " +
-                            s"multiplier: ${sizeMultiplier}x, verification timeout: ${adaptiveTimeout}ms")
-                    
-                    adaptiveTimeout
-                  } catch {
-                    case _: Exception =>
-                      logDebug(s"[ADAPTIVE TIMEOUT] Result size not available, using base timeout: ${baseTimeoutMs}ms")
-                      baseTimeoutMs
-                  }
+                  // Start timeout timer for verification: max(T, 3 x the longer replica's task time),
+                  // so a full-task check of a long task is not duplicated on the driver after T.
+                  // (Replaces a result-size multiplier that never applied: firstEvent.result is the
+                  // deserialized value, never a DirectTaskResult.)
+                  val timeoutMs = effectiveVerificationTimeoutMs(stageId, partitionId)
+                  logInfo(s"[ADAPTIVE TIMEOUT] Verification timeout for stage $stageId pair $partitionId: ${timeoutMs}ms")
                   val timeoutTimestamp = System.currentTimeMillis() + timeoutMs
                   activeTimeouts((stageId, partitionId)) = timeoutTimestamp
 
@@ -2633,9 +2611,8 @@ private[spark] class DAGScheduler(
                 activeTimeouts.remove((stageId, partitionId))
                 
                 // Start new timeout for driver recomputation
-                // Driver timeout is 1.5x verification timeout (last resort needs more time)
-                val verificationTimeoutMs = sc.getConf.get("spark.verification.timeout", "20000").toInt
-                val driverTimeoutMs = (verificationTimeoutMs * 1.5).toInt
+                // Driver timeout is 1.5x the effective verification timeout (last resort needs more time)
+                val driverTimeoutMs = (effectiveVerificationTimeoutMs(stageId, partitionId) * 1.5).toLong
                 val timeoutTimestamp = System.currentTimeMillis() + driverTimeoutMs
                 activeTimeouts((stageId, partitionId)) = timeoutTimestamp
                 
@@ -2710,6 +2687,22 @@ private[spark] class DAGScheduler(
    * Used when third-executor returns NEITHER_MATCH and falls back to driver.
    * Marks driver verification as active (last resort - if this times out, abort job).
    */
+  /**
+   * Verification timeout for replica pair (stageId, k): max(spark.verification.timeout,
+   * 3 x the longer of the two replicas' task durations). A fixed T (20 s by default) is shorter
+   * than one full-task recompute of a long task, which used to start a duplicate driver check.
+   * Only ever lengthens the timeout; short tasks keep exactly T.
+   */
+  private def effectiveVerificationTimeoutMs(stageId: Int, partitionId: Int): Long = {
+    val baseMs = sc.getConf.get("spark.verification.timeout", "20000").toLong
+    def durationMs(e: CompletionEvent): Long =
+      if (e.taskInfo.finished) e.taskInfo.duration else 0L
+    pendingVerificationResults.get((stageId, partitionId)) match {
+      case Some((e1, e2)) => math.max(baseMs, 3L * math.max(durationMs(e1), durationMs(e2)))
+      case None => baseMs
+    }
+  }
+
   def restartTimeoutForDriverVerification(stageId: Int, partitionId: Int): Unit = {
     this.synchronized {
       // Cancel existing timeout
@@ -2719,9 +2712,8 @@ private[spark] class DAGScheduler(
       driverVerificationActive((stageId, partitionId)) = true
       
       // Start new timeout for driver recomputation (longer duration)
-      // Driver timeout is 1.5x verification timeout (last resort needs more time)
-      val verificationTimeoutMs = sc.getConf.get("spark.verification.timeout", "20000").toInt
-      val driverTimeoutMs = (verificationTimeoutMs * 1.5).toInt
+      // Driver timeout is 1.5x the effective verification timeout (last resort needs more time)
+      val driverTimeoutMs = (effectiveVerificationTimeoutMs(stageId, partitionId) * 1.5).toLong
       val timeoutTimestamp = System.currentTimeMillis() + driverTimeoutMs
       activeTimeouts((stageId, partitionId)) = timeoutTimestamp
       
