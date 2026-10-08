@@ -77,6 +77,9 @@ private[spark] class TaskContextImpl(
   
   def getCapturedBackupValue: Option[Any] = capturedBackupValue
 
+  /** This task's chunk digest (chunk verification); null when digests are off. */
+  @transient private[spark] var chunkDigest: org.apache.spark.verification.ChunkDigest = null
+
   /** List of callback functions to execute when the task completes. */
   @transient private val onCompleteCallbacks = new ArrayBuffer[TaskCompletionListener]
 
