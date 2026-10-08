@@ -630,8 +630,11 @@ object TaskResultVerificationManager extends Logging {
       targetElementId = targetElementId,
       merkleLeafHashes = merkleLeafHashes,
       localProperties = task.localProperties,
+      // A fresh driver-registered TaskMetrics (as MerkleTreeBuildTask uses). Re-serializing the
+      // driver's deserialized task.metrics fails on cluster executors with
+      // "Accumulator must be registered before send to executor".
       serializedTaskMetrics = SparkEnv.get.closureSerializer.newInstance()
-        .serialize(task.metrics).array(),
+        .serialize(TaskMetrics.registered).array(),
       jobId = task.jobId,
       appId = task.appId,
       appAttemptId = task.appAttemptId
