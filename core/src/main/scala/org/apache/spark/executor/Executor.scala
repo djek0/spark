@@ -820,6 +820,9 @@ private[spark] class Executor(
           // STRONGER finals file corruption: Replace ENTIRE last value with Byzantine data
           // This ensures Merkle trees will DEFINITELY differ (not just random byte flips)
           // STRATEGY: Commit THIS partition's finals file early, then corrupt it
+          // Only when trace files are written: in chunks mode the digest corruption above the
+          // result hash does this job, and there is no finals file to rewrite.
+          if (org.apache.spark.verification.ChunkConfig.writeTraceFiles) {
           logWarning(s"[BYZANTINE TEST] Starting finals file corruption attempt...")
           try {
             val appName = Option(SparkEnv.get)
@@ -945,6 +948,7 @@ private[spark] class Executor(
           } catch {
             case e: Exception =>
               logWarning(s"[BYZANTINE TEST] Failed to corrupt finals file: ${e.getMessage}")
+          }
           }
           
           byzantineHash // Return corrupted hash
