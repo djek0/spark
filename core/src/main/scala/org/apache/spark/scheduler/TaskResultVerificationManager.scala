@@ -6,6 +6,7 @@ import java.io.File
 import java.nio.file.Files
 import java.nio.ByteBuffer
 import scala.util.Properties.envOrElse
+import scala.collection.concurrent.TrieMap
 import scala.collection.mutable.{HashMap, HashSet}
 import org.apache.spark.internal.Logging
 import org.apache.spark.{TaskContext, TaskContextImpl}
@@ -23,18 +24,24 @@ object TaskResultVerificationManager extends Logging {
     dagScheduler = scheduler
   }
 
+  // Thread safety: the four maps below are written from different threads -- task launch
+  // (TaskSetManager.prepareLaunchingTask -> addNewRunningTask), the 4 TaskResultGetter threads
+  // (addNewResultForTid) and the DAG event loop (consensus, dispatch, cleanup). Plain HashMaps lost
+  // entries under that load ("Task N not found in running tasks, cannot store result hash"), which
+  // sent honest pairs into verification and timeouts. TrieMap is a lock-free concurrent mutable.Map
+  // with snapshot-consistent iteration, so the existing code works on it unchanged.
   // Maps taskId -> (stageId, taskIndex) where taskIndex is the array index (not taskId!)
-  var tidToStageIndexInfo = new HashMap[Long, (Int, Int)]
+  val tidToStageIndexInfo = new TrieMap[Long, (Int, Int)]
   // Maps (stageId, taskIndex) -> resultHash
-  var stageIndexToResultHash = new HashMap[(Int, Int), String]
+  val stageIndexToResultHash = new TrieMap[(Int, Int), String]
   // Track verified partitions to prevent duplicate file verification
   var verifiedPartitions = new HashSet[(Int, Int)]()
   // Track partitions with verification in progress to prevent duplicate verification tasks
   var verificationInProgress = new HashSet[(Int, Int)]()
   // Store Task objects for driver recomputation (only original tasks, not verification tasks)
-  var stageIndexToOriginalTask = new HashMap[(Int, Int), Task[_]]()
+  val stageIndexToOriginalTask = new TrieMap[(Int, Int), Task[_]]()
   // Track which executor and host ran which task (for host-level locality and third-executor verification)
-  var stageIndexToExecutor = new HashMap[(Int, Int), (String, String)]()
+  val stageIndexToExecutor = new TrieMap[(Int, Int), (String, String)]()
   // Track Merkle tree build results from executors
   private val merkleTreeBuildResults = new HashMap[String, MerkleTreeBuildResult]()
   private val merkleTreeBuildLock = new Object()
