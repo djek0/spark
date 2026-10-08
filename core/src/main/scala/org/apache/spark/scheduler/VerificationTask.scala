@@ -77,6 +77,7 @@ private[spark] class VerificationTask(
     stageAttemptId: Int,
     partitionId: Int,
     val originalTask: Task[_],
+    val pairIndex: Int,  // replica pair k = index / 2: the key the driver files this verdict under
     val excludedExecutors: Set[String],
     val replicaIndex1: Int,
     val replicaIndex2: Int,

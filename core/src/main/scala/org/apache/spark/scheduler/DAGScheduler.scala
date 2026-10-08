@@ -1816,7 +1816,7 @@ private[spark] class DAGScheduler(
             // Capture the result and pass to verification manager
             TaskResultVerificationManager.completeVerificationTask(
               task.stageId,
-              task.partitionId,
+              vt.pairIndex,  // the pair k the verdict is keyed by (== partitionId for full jobs)
               event.result
             )
           case _ =>

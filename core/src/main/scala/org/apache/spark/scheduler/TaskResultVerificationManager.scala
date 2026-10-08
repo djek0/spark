@@ -616,12 +616,18 @@ object TaskResultVerificationManager extends Logging {
 
     logInfo(s"[THIRD-EXECUTOR] Passing replica hashes to executor: idx$index1=$hash1, idx$index2=$hash2")
 
+    // Replica pair k = index / 2. Verifier bookkeeping is keyed by (stage, k), like
+    // pendingVerificationResults and the timeouts; k differs from task.partitionId when the
+    // TaskSet does not cover all partitions in order (take/first/lookup, partial retries).
+    val pairIndex = math.min(index1, index2) / 2
+
     // Create verification task WITH HASHES (and optional single-element parameters)
     val verificationTask = new VerificationTask(
       stageId = task.stageId,
       stageAttemptId = task.stageAttemptId,
       partitionId = task.partitionId,
       originalTask = task,
+      pairIndex = pairIndex,
       excludedExecutors = excludedExecutors,
       replicaIndex1 = index1,
       replicaIndex2 = index2,
@@ -643,9 +649,9 @@ object TaskResultVerificationManager extends Logging {
     // Wrap in TaskSet with single task
     // CRITICAL FIX: Use a very high stageAttemptId to avoid collision with original TaskSet
     // Original TaskSet typically has stageAttemptId = 0
-    // Verification TaskSets use stageAttemptId = 1000000 + partitionId to ensure uniqueness
+    // Verification TaskSets use stageAttemptId = 1000000 + k (replica pair) to ensure uniqueness
     // This prevents verification TaskSet completion from removing the original TaskSet from pool
-    val verificationStageAttemptId = 1000000 + task.partitionId
+    val verificationStageAttemptId = 1000000 + pairIndex
     
     val verificationProperties = new java.util.Properties()
     verificationProperties.putAll(task.localProperties.asInstanceOf[java.util.Map[_, _]])
@@ -662,10 +668,10 @@ object TaskResultVerificationManager extends Logging {
     )
 
     // Store metadata so we can process result when task completes
-    val partitionKey = (task.stageId, task.partitionId)
+    val partitionKey = (task.stageId, pairIndex)
     pendingVerifications(partitionKey) = (index1, index2)
 
-    logInfo(s"[THIRD-EXECUTOR] Submitting verification TaskSet for stage ${task.stageId}, partition ${task.partitionId}")
+    logInfo(s"[THIRD-EXECUTOR] Submitting verification TaskSet for stage ${task.stageId}, partition ${task.partitionId} (pair $pairIndex)")
     logWarning(s"[TASK ID CONSUMPTION] Verification TaskSet will consume task IDs when scheduled (1 task for partition ${task.partitionId})")
 
     // Submit to scheduler (non-blocking)
@@ -677,6 +683,7 @@ object TaskResultVerificationManager extends Logging {
    * Called by DAGScheduler when verification task completes.
    */
   def completeVerificationTask(stageId: Int, partitionId: Int, result: Any): Unit = {
+    // partitionId here is the replica pair k (VerificationTask.pairIndex), not the RDD partition
     val partitionKey = (stageId, partitionId)
     pendingVerifications.get(partitionKey) match {
       case Some((index1, index2)) =>
