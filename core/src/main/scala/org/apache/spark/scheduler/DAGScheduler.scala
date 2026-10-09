@@ -1768,6 +1768,26 @@ private[spark] class DAGScheduler(
   }
 
   /**
+   * Merge the accumulators of the replica event committed for its partition: once per output for
+   * result tasks (vanilla's guard), on every commit for map tasks (as vanilla does).
+   */
+  private def mergeCommittedAccumulators(event: CompletionEvent, stage: Stage): Unit = {
+    event.task match {
+      case rt: ResultTask[_, _] =>
+        stage.asInstanceOf[ResultStage].activeJob match {
+          case Some(job) =>
+            // Only update the accumulator once for each result task.
+            if (!job.finished(rt.outputId) && canEndPartitionForResultStage(rt.partitionId)) {
+              updateAccumulators(event)
+            }
+          case None => // Ignore update if task's job has finished.
+        }
+      case _ =>
+        updateAccumulators(event)
+    }
+  }
+
+  /**
    * Check [[SparkContext.SPARK_JOB_INTERRUPT_ON_CANCEL]] in job properties to see if we should
    * interrupt running tasks. Returns `false` if the property value is not a boolean value
    */
@@ -1884,21 +1904,13 @@ private[spark] class DAGScheduler(
     event.reason match {
       case Success =>
         task match {
-          case rt: ResultTask[_, _] =>
-            val resultStage = stage.asInstanceOf[ResultStage]
-            addPartitionPerResultStage(rt.partitionId)
-            resultStage.activeJob match {
-              case Some(job) =>
-                logDebug(s"ResultTask outputId: ${rt.outputId}")
-                // Only update the accumulator once for each result task.
-                if (!job.finished(rt.outputId) && canEndPartitionForResultStage(rt.partitionId)) {
-                  updateAccumulators(event)
-                }
-              case None => // Ignore update if task's job has finished.
-            }
+          case rt: ResultTask[_, _] => addPartitionPerResultStage(rt.partitionId)
           case _ =>
-            updateAccumulators(event)
         }
+        // A fresh replica event (bypassBatching = false) only joins the pairing below. The event
+        // that is committed merges its accumulators once: here on the re-entry that commits it
+        // (bypassBatching = true), or at the fall-through after pairing.
+        if (bypassBatching) mergeCommittedAccumulators(event, stage)
       case _: ExceptionFailure | _: TaskKilled => updateAccumulators(event)
       case _ =>
     }
@@ -1909,7 +1921,7 @@ private[spark] class DAGScheduler(
         task match {
           case _: ResultTask[_, _] | _: ShuffleMapTask =>
             logInfo("Checking consensus from TaskResultVerification")
-            TaskResultVerificationManager.checkConsensus(event.taskInfo.taskId.toInt)
+            TaskResultVerificationManager.checkConsensus(event.taskInfo.taskId)
           case _ =>
             logDebug(s"[VERIFICATION REGISTER] Skipping consensus check for verification task ${task.getClass.getSimpleName} (taskId=${event.taskInfo.taskId})")
         }
@@ -1985,7 +1997,7 @@ private[spark] class DAGScheduler(
                   // NOW dispatch verification AFTER pending verification is stored
                   // This prevents race condition where driver verification completes before pending entry exists
                   logInfo("Dispatching verifyResult() after batching complete")
-                  TaskResultVerificationManager.verifyResult(firstEvent.taskInfo.taskId.toInt, taskScheduler)
+                  TaskResultVerificationManager.verifyResult(firstEvent.taskInfo.taskId, taskScheduler)
 
                   // Return early - will resume when verdict arrives via completeVerificationWithVerdict()
                   return
@@ -2016,7 +2028,8 @@ private[spark] class DAGScheduler(
               handleTaskCompletion(firstEvent, bypassBatching = true)
               return
             }
-            // else: current event is Success, continue normal flow below
+            // else: current event is Success, continue normal flow below; it is the committed one
+            mergeCommittedAccumulators(event, stage)
           }
           else {
             logInfo(s"[BATCHING] First replica for partition $partitionId (taskId=${event.taskInfo.taskId}), waiting for partner")
