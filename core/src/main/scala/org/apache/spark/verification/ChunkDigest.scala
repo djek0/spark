@@ -17,8 +17,6 @@
 
 package org.apache.spark.verification
 
-import java.util.Locale
-
 import scala.util.Try
 import scala.util.control.NonFatal
 
@@ -206,15 +204,6 @@ object ChunkDigest {
     cur
   }
 
-  /** Same content at the coarser of the two resolutions (shadow logging). */
-  def sameDigest(a: DigestView, b: DigestView): Boolean = {
-    val s = math.max(a.shift, b.shift)
-    val x = foldTo(a.boxes, a.shift, s); val y = foldTo(b.boxes, b.shift, s)
-    val n = math.max(x.length, y.length); var i = 0
-    while (i < n) { if (boxAt(x, i) != boxAt(y, i)) return false; i += 1 }
-    true
-  }
-
   /**
    * First differing chunk as (lo, hi, boxA, boxB) over UIDs [lo, hi). None means the difference
    * cannot be localized and the caller must use full-task verification: a digest is invalid,
@@ -258,18 +247,9 @@ object ChunkConfig {
   private def env(k: String, d: String): String = scala.util.Properties.envOrElse(k, d).trim
   private def bool(k: String, d: Boolean): Boolean = Try(env(k, d.toString).toBoolean).getOrElse(d)
 
-  /**
-   * MERKLE_LOCALIZATION = chunks (default) | shadow | trees (the original Merkle trees).
-   * An unknown value falls back to trees, the original behavior.
-   */
-  lazy val mode: String = env("MERKLE_LOCALIZATION", "chunks").toLowerCase(Locale.ROOT) match {
-    case m @ ("trees" | "shadow" | "chunks") => m
-    case _ => "trees"
-  }
   lazy val merkleOn: Boolean = bool("MERKLE_VERIFICATION", true)
-  lazy val computeDigests: Boolean = merkleOn && mode != "trees"
-  lazy val shadow: Boolean = merkleOn && mode == "shadow"
-  lazy val useChunks: Boolean = merkleOn && mode == "chunks"
+  /** Chunks are the only localization since the Merkle trees were removed. */
+  lazy val useChunks: Boolean = merkleOn
   lazy val maxChunks: Int = {
     val v = Try(env("CHUNK_MAX", "1024").toInt).getOrElse(1024)
     Integer.highestOneBit(math.min(math.max(v, 2), 1 << 16))
@@ -280,14 +260,14 @@ object ChunkConfig {
 
   /** Called by the logging point. Returns the task's new digest, or null when digests are off. */
   def newDigest(context: TaskContext): ChunkDigest = context match {
-    case impl: TaskContextImpl if computeDigests =>
+    case impl: TaskContextImpl if merkleOn =>
       if (impl.chunkDigest != null) {
         impl.chunkDigest.invalid = true   // a second logging point in one task: never trust it
         null
       } else {
         val d = new ChunkDigest(maxChunks); impl.chunkDigest = d; d
       }
-    case _ => null                        // trees mode, Merkle off, or a barrier task
+    case _ => null                        // Merkle off, or a barrier task
   }
 
   /** The block to put before the result hash; empty when the task has no digest. */

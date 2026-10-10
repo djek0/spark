@@ -56,30 +56,14 @@ private[spark] class TaskContextImpl(
     // The default value is only used in tests.
     override val taskMetrics: TaskMetrics = TaskMetrics.empty,
     override val resources: Map[String, ResourceInformation] = Map.empty,
-    var targetElementId: Option[Long] = None,
     var targetRange: Option[(Long, Long)] = None)  // chunk verification: UIDs [lo, hi)
   extends TaskContext
   with Logging {
 
-  override def isVerificationTask: Boolean = targetElementId.isDefined || targetRange.isDefined
+  override def isVerificationTask: Boolean = targetRange.isDefined
 
   /** Chunk verification: the verifier's box for targetRange, filled at the logging level. */
   @transient private[spark] var rangeBox: org.apache.spark.verification.RangeBox = null
-  
-  /**
-   * Captured backup iterator value for verification tasks.
-   * When verification task computes through unsafe transformations,
-   * we capture the intermediate value at the backup iterator checkpoint
-   * (where Merkle tree was built) instead of the final result.
-   * This ensures verification compares the same values that were logged.
-   */
-  @volatile private var capturedBackupValue: Option[Any] = None
-  
-  def setCapturedBackupValue(value: Any): Unit = {
-    capturedBackupValue = Some(value)
-  }
-  
-  def getCapturedBackupValue: Option[Any] = capturedBackupValue
 
   /** This task's chunk digest (chunk verification); null when digests are off. */
   @transient private[spark] var chunkDigest: org.apache.spark.verification.ChunkDigest = null

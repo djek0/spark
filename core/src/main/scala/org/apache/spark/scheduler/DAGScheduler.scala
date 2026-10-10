@@ -1844,10 +1844,6 @@ private[spark] class DAGScheduler(
         }
         postTaskEnd(event)
         return
-      case _: MerkleTreeBuildTask =>
-        logInfo(s"[MERKLE] MerkleTreeBuildTask ${event.taskInfo.taskId} completed for stage ${task.stageId}, partition ${task.partitionId}")
-        postTaskEnd(event)
-        return
       case _ =>
         // Not a verification task, continue normal processing
     }

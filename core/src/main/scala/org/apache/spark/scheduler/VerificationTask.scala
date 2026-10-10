@@ -84,8 +84,6 @@ private[spark] class VerificationTask(
     val replicaIndex2: Int,
     val replicaHash1: String,
     val replicaHash2: String,
-    val targetElementId: Option[Long] = None,  // For single-element verification
-    val merkleLeafHashes: Option[(Int, Int)] = None,  // (leafHash1, leafHash2) for Merkle mode
     localProperties: Properties,
     serializedTaskMetrics: Array[Byte],
     jobId: Option[Int] = None,
@@ -113,157 +111,69 @@ private[spark] class VerificationTask(
   override def runTask(context: TaskContext): VerificationVerdict = {
     if (targetRange.isDefined && chunkBoxes.isDefined) return runChunkVerification(context)
 
-    val modeStr = targetElementId.map(id => s"single-element (UID $id)").getOrElse("full-task")
-    logInfo(s"[VERIFICATION] Running verification task for partition $partitionId on executor ${context.taskAttemptId()} - mode: $modeStr")
+    logInfo(s"[VERIFICATION] Running full-task verification for partition $partitionId on executor ${context.taskAttemptId()}")
     logInfo(s"[VERIFICATION] Excluded executors: $excludedExecutors")
-    
-    // Choose verification strategy based on mode
-    (targetElementId, merkleLeafHashes) match {
-      case (Some(uid), Some((leafHash1, leafHash2))) =>
-        // SINGLE-ELEMENT MODE: Compare leaf hashes
-        logWarning(s"[EXECUTOR RECOMPUTE] Single-element mode: UID $uid")
-        logWarning(s"[EXECUTOR RECOMPUTE] Replica 1 (idx$replicaIndex1) leaf hash: $leafHash1")
-        logWarning(s"[EXECUTOR RECOMPUTE] Replica 2 (idx$replicaIndex2) leaf hash: $leafHash2")
-        
-        // Create TaskContext with targetElementId for filtering
-        val filteredContext = new org.apache.spark.TaskContextImpl(
-          stageId = context.stageId(),
-          stageAttemptNumber = context.stageAttemptNumber(),
-          partitionId = context.partitionId(),
-          taskAttemptId = context.taskAttemptId(),
-          attemptNumber = context.attemptNumber(),
-          taskIndex = context.taskIndex(),
-          taskMemoryManager = context.taskMemoryManager(),
-          localProperties = localProperties,
-          metricsSystem = SparkEnv.get.metricsSystem,
-          taskMetrics = context.taskMetrics(),
-          resources = context.resources(),
-          targetElementId = Some(uid)
-        )
-        
-        TaskContext.setTaskContext(filteredContext)
-        
-        // Start timer for single-element verification
-        val singleElementStartTime = System.nanoTime()
-        
-        val result = originalTask.runTask(filteredContext)
-        
-        // Log single-element verification time
-        val singleElementTime = (System.nanoTime() - singleElementStartTime) / 1e9
-        logWarning(s"[PERF-MERKLE-ELEMENT] Stage $stageId partition $partitionId: ${singleElementTime}s")
-        
-        // Extract the element at UID - prefer captured backup value
-        val elementAtUid = filteredContext match {
-          case ctx: TaskContextImpl if ctx.getCapturedBackupValue.isDefined =>
-            logWarning(s"[VERIFICATION] Using captured backup value (same stage as finals file)")
-            ctx.getCapturedBackupValue.get
-          case _ =>
-            // Fallback: extract from task result
-            logWarning(s"[VERIFICATION] Using task result (no backup value captured)")
-            result match {
-              case arr: Array[_] if arr.length > 0 => arr(0)
-              case other => other
-            }
-        }
-        
-        // Helper function to format values with proper array handling (same as SafeWriter.writeEntry)
-        def formatValueWithArrays(value: Any): String = value match {
-          case arr: Array[_] => arr.mkString("[", ",", "]")
-          case prod: Product => 
-            // Handle tuples and case classes - recursively format nested arrays
-            prod.productIterator.map(formatValueWithArrays).mkString("(", ",", ")")
-          case other => other.toString
-        }
-        
-        val verifierValue = formatValueWithArrays(elementAtUid)
-        val verifierLeafHash = verifierValue.hashCode
-        
-        logWarning(s"[VERIFICATION] Verifier computed value: $verifierValue")
-        logWarning(s"[VERIFICATION] Verifier leaf hash: $verifierLeafHash")
-        
-        // Compare leaf hashes
-        val verdict = (verifierLeafHash == leafHash1, verifierLeafHash == leafHash2) match {
-          case (true, false) => "REPLICA_1_CORRECT"
-          case (false, true) => "REPLICA_2_CORRECT"
-          case (true, true) => "BOTH_MATCH"
-          case (false, false) => "NEITHER_MATCH"
-        }
-        
-        logWarning(s"[VERIFICATION] Verdict: $verdict (verifier=$verifierLeafHash vs replica1=$leafHash1 vs replica2=$leafHash2)")
-        
-        VerificationVerdict(
-          stageId = stageId,
-          partitionId = partitionId,
-          replicaIndex1 = replicaIndex1,
-          replicaIndex2 = replicaIndex2,
-          verifierHash = verifierLeafHash.toString,
-          replicaHash1 = leafHash1.toString,
-          replicaHash2 = leafHash2.toString,
-          verdict = verdict
-        )
-        
-      case _ =>
-        // FULL-TASK MODE: Compare full result hashes
-        logInfo(s"[VERIFICATION] Full-task mode")
-        logInfo(s"[VERIFICATION] Replica 1 (idx$replicaIndex1) hash: $replicaHash1")
-        logInfo(s"[VERIFICATION] Replica 2 (idx$replicaIndex2) hash: $replicaHash2")
-        
-        // Start timer for full-task verification
-        val fullTaskStartTime = System.nanoTime()
-        
-        val result = try {
-          originalTask.runTask(context)
-        } catch {
-          case t: Throwable =>
-            logWarning(s"[VERIFICATION] originalTask.runTask failed for partition $partitionId: ${t.getMessage}")
-            return VerificationVerdict(stageId, partitionId, replicaIndex1, replicaIndex2,
-              "ERROR", replicaHash1, replicaHash2, "NEITHER_MATCH")
-        }
-        
-        // Log full-task verification time
-        val fullTaskTime = (System.nanoTime() - fullTaskStartTime) / 1e9
-        logWarning(s"[PERF-FULLTASK] Stage $stageId partition $partitionId: ${fullTaskTime}s")
-        
-        // Use same hashing logic as Executor.scala for consistency
-        val verifierHash = if (originalTask.isInstanceOf[ShuffleMapTask]) {
-          // For ShuffleMapTask: Hash block sizes (deterministic across replicas)
-          // MapStatus includes BlockManagerId which is non-deterministic
-          val mapStatus = result.asInstanceOf[MapStatus]
-          
-          // Exactly one size per reduce partition (see ShuffleMapTask.blockSizesForHash)
-          val blockSizes = originalTask.asInstanceOf[ShuffleMapTask].blockSizesForHash(mapStatus)
-          val sizeString = blockSizes.mkString(",")
-          logInfo(s"[VERIFICATION SHUFFLE HASH] Hashing ${blockSizes.length} block sizes: ${sizeString.take(200)}...")
-          TaskResultVerificationManager.computeTaskResultHash(
-            java.nio.ByteBuffer.wrap(sizeString.getBytes("UTF-8"))
-          )
-        } else {
-          // For ResultTask: Hash the full serialized result (current behavior)
-          TaskResultVerificationManager.computeTaskResultHash(result)
-        }
-        
-        logInfo(s"[VERIFICATION] Verifier hash: $verifierHash")
-        
-        val verdict = (verifierHash == replicaHash1, verifierHash == replicaHash2) match {
-          case (true, false) => "REPLICA_1_CORRECT"
-          case (false, true) => "REPLICA_2_CORRECT"
-          case (true, true) => "BOTH_MATCH"
-          case (false, false) => "NEITHER_MATCH"
-        }
-        
-        logInfo(s"[VERIFICATION] Verdict: $verdict")
-        
-        VerificationVerdict(
-          stageId = stageId,
-          partitionId = partitionId,
-          replicaIndex1 = replicaIndex1,
-          replicaIndex2 = replicaIndex2,
-          verifierHash = verifierHash,
-          replicaHash1 = replicaHash1,
-          replicaHash2 = replicaHash2,
-          verdict = verdict
-        )
+
+    // FULL-TASK MODE: Compare full result hashes
+    logInfo(s"[VERIFICATION] Full-task mode")
+    logInfo(s"[VERIFICATION] Replica 1 (idx$replicaIndex1) hash: $replicaHash1")
+    logInfo(s"[VERIFICATION] Replica 2 (idx$replicaIndex2) hash: $replicaHash2")
+
+    // Start timer for full-task verification
+    val fullTaskStartTime = System.nanoTime()
+
+    val result = try {
+      originalTask.runTask(context)
+    } catch {
+      case t: Throwable =>
+        logWarning(s"[VERIFICATION] originalTask.runTask failed for partition $partitionId: ${t.getMessage}")
+        return VerificationVerdict(stageId, partitionId, replicaIndex1, replicaIndex2,
+          "ERROR", replicaHash1, replicaHash2, "NEITHER_MATCH")
     }
+
+    // Log full-task verification time
+    val fullTaskTime = (System.nanoTime() - fullTaskStartTime) / 1e9
+    logWarning(s"[PERF-FULLTASK] Stage $stageId partition $partitionId: ${fullTaskTime}s")
+
+    // Use same hashing logic as Executor.scala for consistency
+    val verifierHash = if (originalTask.isInstanceOf[ShuffleMapTask]) {
+      // For ShuffleMapTask: Hash block sizes (deterministic across replicas)
+      // MapStatus includes BlockManagerId which is non-deterministic
+      val mapStatus = result.asInstanceOf[MapStatus]
+
+      // Exactly one size per reduce partition (see ShuffleMapTask.blockSizesForHash)
+      val blockSizes = originalTask.asInstanceOf[ShuffleMapTask].blockSizesForHash(mapStatus)
+      val sizeString = blockSizes.mkString(",")
+      logInfo(s"[VERIFICATION SHUFFLE HASH] Hashing ${blockSizes.length} block sizes: ${sizeString.take(200)}...")
+      TaskResultVerificationManager.computeTaskResultHash(
+        java.nio.ByteBuffer.wrap(sizeString.getBytes("UTF-8"))
+      )
+    } else {
+      // For ResultTask: Hash the full serialized result (current behavior)
+      TaskResultVerificationManager.computeTaskResultHash(result)
+    }
+
+    logInfo(s"[VERIFICATION] Verifier hash: $verifierHash")
+
+    val verdict = (verifierHash == replicaHash1, verifierHash == replicaHash2) match {
+      case (true, false) => "REPLICA_1_CORRECT"
+      case (false, true) => "REPLICA_2_CORRECT"
+      case (true, true) => "BOTH_MATCH"
+      case (false, false) => "NEITHER_MATCH"
+    }
+
+    logInfo(s"[VERIFICATION] Verdict: $verdict")
+
+    VerificationVerdict(
+      stageId = stageId,
+      partitionId = partitionId,
+      replicaIndex1 = replicaIndex1,
+      replicaIndex2 = replicaIndex2,
+      verifierHash = verifierHash,
+      replicaHash1 = replicaHash1,
+      replicaHash2 = replicaHash2,
+      verdict = verdict
+    )
   }
 
   /**

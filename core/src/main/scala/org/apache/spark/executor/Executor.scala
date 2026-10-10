@@ -118,7 +118,7 @@ private[spark] class Executor(
     Executors.newCachedThreadPool(threadFactory).asInstanceOf[ThreadPoolExecutor]
   }
   
-  // Dedicated thread pool for verification tasks (VerificationTask, MerkleTreeBuildTask)
+  // Dedicated thread pool for verification tasks (VerificationTask)
   // Only created if VERIFICATION_POOL_SIZE is set and > 0
   // This ensures verification tasks NEVER run on potentially Byzantine workers
   private val verificationThreadPool: Option[ThreadPoolExecutor] = {
@@ -646,10 +646,10 @@ private[spark] class Executor(
          * If we send wrong type we get ClassCastException at runtime
          * So we modify the BYTES (changing the hash) but keep the TYPE structure intact
          */
-        // Skip Byzantine behavior for verification tasks (MerkleTreeBuildTask, VerificationTask)
+        // Skip Byzantine behavior for verification tasks
         // Rational Byzantine executors would never corrupt verification infrastructure
         val taskClassName = task.getClass.getName
-        val isVerificationTask = taskClassName.contains("MerkleTreeBuildTask") || taskClassName.contains("VerificationTask")
+        val isVerificationTask = taskClassName.contains("VerificationTask")
 
         // Read Byzantine interval at task execution time
         // BYZANTINE_PROBABILITY=N means "every Nth task is Byzantine"
@@ -816,141 +816,7 @@ private[spark] class Executor(
           }
           
            logWarning(s"[BYZANTINE TEST] Hash corruption: honest=$honestHash -> byzantine=$byzantineHash (XOR with $randomBitPattern)")
-          
-          // STRONGER finals file corruption: Replace ENTIRE last value with Byzantine data
-          // This ensures Merkle trees will DEFINITELY differ (not just random byte flips)
-          // STRATEGY: Commit THIS partition's finals file early, then corrupt it
-          // Only when trace files are written: in chunks mode the digest corruption above the
-          // result hash does this job, and there is no finals file to rewrite.
-          if (org.apache.spark.verification.ChunkConfig.writeTraceFiles) {
-          logWarning(s"[BYZANTINE TEST] Starting finals file corruption attempt...")
-          try {
-            val appName = Option(SparkEnv.get)
-              .flatMap(e => Option(e.conf.get("spark.app.name", "unknown")))
-              .getOrElse("unknown")
-            val debugMode = sys.env.getOrElse("DEBUG_MODE", "false").toBoolean
-            
-            // Build path to finals files using FileFormatUtils (respects SPARK_TRACE_DIR env var)
-            val finalsPath = org.apache.spark.util.FileFormatUtils.buildFinalsPath(
-              appName, task.stageId, taskDescription.index, task.partitionId, debugMode)
-            val tmpFile = new java.io.File(finalsPath.replaceAll("\\.(bin|log)$", ".tmp"))
-            val finalsFile = new java.io.File(finalsPath)
 
-            logWarning(s"[BYZANTINE TEST] Looking for finals .tmp file: ${tmpFile.getAbsolutePath}")
-            
-            // STEP 1: Find and commit the SafeWriter for this partition ONLY
-            val threadName = Thread.currentThread().getName
-            val writerList = org.apache.spark.rdd.Trace.getActiveWriters(threadName)
-            var committedEarly = false
-            
-            if (writerList != null && !writerList.isEmpty) {
-              logWarning(s"[BYZANTINE TEST] Found ${writerList.size()} active writers for thread $threadName")
-              val it = writerList.iterator()
-              while (it.hasNext && !committedEarly) {
-                val writer = it.next()
-                val writerPath = writer.targetFile.getAbsolutePath
-                logWarning(s"[BYZANTINE TEST] Checking writer: $writerPath")
-                
-                if (writerPath == tmpFile.getAbsolutePath) {
-                  logWarning(s"[BYZANTINE TEST] ✓ MATCH! Found SafeWriter for this partition")
-                  logWarning(s"[BYZANTINE TEST] Closing writer...")
-                  writer.safeClose()  // Close the writer first
-                  
-                  logWarning(s"[BYZANTINE TEST] Committing: ${tmpFile.getName} → ${finalsFile.getName}")
-                  org.apache.spark.rdd.Trace.commitLogs(writer)  // Commit: .tmp → .bin/.log
-                  
-                  // Wait a moment for filesystem to sync
-                  Thread.sleep(100)
-                  
-                  committedEarly = true
-                  logWarning(s"[BYZANTINE TEST] ✓ Early commit successful!")
-                }
-              }
-            } else {
-              logWarning(s"[BYZANTINE TEST] No active writers found for thread $threadName")
-            }
-            
-            if (!committedEarly) {
-              logWarning(s"[BYZANTINE TEST] ✗ WARNING: Could not find SafeWriter for early commit!")
-              logWarning(s"[BYZANTINE TEST] Expected path: ${tmpFile.getAbsolutePath}")
-              logWarning(s"[BYZANTINE TEST] Corruption will likely FAIL")
-            }
-            
-            // STEP 2: Verify the committed file exists
-            logWarning(s"[BYZANTINE TEST] Checking for committed finals file: ${finalsFile.getAbsolutePath}")
-            logWarning(s"[BYZANTINE TEST] File exists: ${finalsFile.exists()}, size: ${if (finalsFile.exists()) finalsFile.length() else 0} bytes")
-            
-            if (finalsFile.exists()) {
-              logWarning(s"[BYZANTINE TEST] File found, debugMode=$debugMode, choosing corruption path...")
-              if (debugMode) {
-                // Text mode: Replace ENTIRE last value with deterministic Byzantine data
-                logWarning(s"[BYZANTINE TEST] Using TEXT mode corruption")
-                // Keep UID (before |), replace value (after |) completely
-                val src = scala.io.Source.fromFile(finalsFile)
-                val lines = src.getLines().toArray
-                src.close()
-                if (lines.nonEmpty) {
-                  val parts = lines.last.split("\\|", 2)
-                  if (parts.length == 2) {
-                    // Generate deterministic Byzantine value based on task ID
-                    val byzantineValue = s"BYZANTINE_TASK${taskId}_HASH${byzantineHash}_CORRUPT"
-                    lines(lines.length - 1) = s"${parts(0)}|$byzantineValue"
-                    val pw = new java.io.PrintWriter(finalsFile)
-                    lines.foreach(pw.println)
-                    pw.close()
-                    logWarning(s"[BYZANTINE TEST] Corrupted finals file (text): ${finalsFile.getName}, replaced value with '$byzantineValue'")
-                  }
-                }
-              } else {
-                // Binary mode: Replace ENTIRE last value with deterministic Byzantine bytes
-                logWarning(s"[BYZANTINE TEST] Using BINARY mode corruption")
-                // Keep UID (8 bytes) + length (4 bytes), replace value bytes completely
-                val fileBytes = java.nio.file.Files.readAllBytes(finalsFile.toPath)
-                if (fileBytes.length > 12) { // At least one entry: 8(Long) + 4(Int) + value
-                  var pos = 0
-                  var lastEntryStart = -1
-                  var lastValueStart = -1
-                  var lastValueLen = 0
-                  val buf = java.nio.ByteBuffer.wrap(fileBytes)
-                  while (pos + 12 <= fileBytes.length) {
-                    buf.position(pos)
-                    val _uid = buf.getLong()
-                    val len = buf.getInt()
-                    if (len >= 0 && pos + 12 + len <= fileBytes.length) {
-                      lastEntryStart = pos
-                      lastValueStart = pos + 12
-                      lastValueLen = len
-                      pos += 12 + len
-                    } else {
-                      pos = fileBytes.length // malformed, stop
-                    }
-                  }
-                  if (lastValueStart >= 0 && lastValueLen >= 1) {
-                    // Generate deterministic Byzantine value bytes
-                    // Use task ID and byzantine hash to create unique pattern
-                    val byzantinePattern = s"BYZANTINE_T${taskId}_H${byzantineHash}".getBytes("UTF-8")
-                    
-                    // Fill the entire value region with Byzantine pattern (repeat if needed)
-                    var byteIdx = 0
-                    for (i <- 0 until lastValueLen) {
-                      fileBytes(lastValueStart + i) = byzantinePattern(byteIdx % byzantinePattern.length)
-                      byteIdx += 1
-                    }
-                    
-                    java.nio.file.Files.write(finalsFile.toPath, fileBytes)
-                    logWarning(s"[BYZANTINE TEST] Corrupted finals file (binary): ${finalsFile.getName}, replaced ${lastValueLen} bytes with Byzantine pattern")
-                  }
-                }
-              }
-            } else {
-              logWarning(s"[BYZANTINE TEST] Finals file not found: ${finalsFile.getAbsolutePath}")
-            }
-          } catch {
-            case e: Exception =>
-              logWarning(s"[BYZANTINE TEST] Failed to corrupt finals file: ${e.getMessage}")
-          }
-          }
-          
           byzantineHash // Return corrupted hash
         } else {
           honestHash // Return honest hash

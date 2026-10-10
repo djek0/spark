@@ -456,22 +456,6 @@ abstract class RDD[T: ClassTag](
                     elem
                   }
 
-                case ctx: TaskContextImpl if ctx.targetElementId.isDefined =>
-                  // Single-element verification: value already captured at stage root
-                  // Just flow the iterator through, updating the captured value with final transformation
-                  val targetId = ctx.targetElementId.get
-                  logDebug(s"[VERIFICATION] Using backup iterator for target UID $targetId")
-                  
-                  // Use MAP to let the single element flow through and update captured value
-                  // No need to check UID - we know there's only 1 element (from flatMap filtering)
-                  backupIt.map { elem =>
-                    val uid = Trace.dequeueUid()  // Dequeue UID (there's only 1)
-                    // No need to re-enqueue - this is outermost (last RDD)
-                    logWarning(s"[VERIFICATION] Updated captured value at outermost for UID $uid: $elem (type=${elem.getClass.getSimpleName})")
-                    ctx.setCapturedBackupValue(elem)  // Update with final transformed value
-                    elem  // Return element so iterator flows through
-                  }
-                  
                 case _ =>
                   // Full-task verification: just return iterator without logging
                   logDebug(s"[VERIFICATION] Full-task verification, returning iterator without logging")
@@ -621,28 +605,6 @@ abstract class RDD[T: ClassTag](
               }
             }
 
-          case ctx: TaskContextImpl if ctx.targetElementId.isDefined =>
-            val isVerificationTask = ctx.isVerificationTask
-            val targetId = ctx.targetElementId.get
-            logDebug(s"[SINGLE-ITERATOR] got in $isVerificationTask with element id $targetId ")
-            // Verification mode: traverse iterator and filter single element by UID
-
-            
-            // Filter to ONLY the target element - creates iterator with 1 element
-            // This avoids full-task recomputation (only processes target UID)
-            baseIter.flatMap { value =>
-              val currentUid = Trace.generateUid()
-              if (currentUid == targetId) {
-                Trace.enqueueUid(currentUid)  // Only enqueue the UID we're returning
-                logWarning(s"[VERIFICATION] Captured value from stage root for UID $currentUid: $value")
-                ctx.setCapturedBackupValue(value)
-                Some(value)  // Return ONLY this element
-              } else {
-                // Don't enqueue UIDs for elements we're not returning
-                None  // Skip other elements
-              }
-            }
-          
           case _ =>
             // Normal mode: track UIDs and optionally log full input values
             val debugMode = sys.env.getOrElse("DEBUG_MODE", "false").toBoolean
