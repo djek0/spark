@@ -45,6 +45,9 @@ object TaskResultVerificationManager extends Logging {
   // Chunk digests of replica results, keyed (stageId, taskIndex). Written by TaskResultGetter
   // threads, read and removed on the DAG thread, hence concurrent.
   private val chunkDigests = new TrieMap[(Int, Int), DigestView]()
+  // Driver recomputes run outside Task.run, so each registers its own block-manager task id, as
+  // Task.run does: unique and negative (real ids are >= 0; -1024 is Spark's NON_TASK_WRITER)
+  private val driverTaskIds = new java.util.concurrent.atomic.AtomicLong(-2048L)
 
   // Configuration: Enable third-executor verification
   private val useExecutorVerification = envOrElse("EXEC_VERIFICATION", "true").toBoolean
@@ -776,12 +779,13 @@ object TaskResultVerificationManager extends Logging {
         executeOnDriver(stageId, index1, index2, partitionId)
         return
     }
-    val tmm = new org.apache.spark.memory.TaskMemoryManager(SparkEnv.get.memoryManager, -1L)
+    val driverTaskId = driverTaskIds.getAndDecrement()
+    val tmm = new org.apache.spark.memory.TaskMemoryManager(SparkEnv.get.memoryManager, driverTaskId)
     val ctx = new TaskContextImpl(
       stageId = rt.stageId,
       stageAttemptNumber = rt.stageAttemptId,
       partitionId = rt.partitionId,
-      taskAttemptId = -1L,
+      taskAttemptId = driverTaskId,
       attemptNumber = 0,
       taskIndex = index1,
       taskMemoryManager = tmm,
@@ -794,6 +798,7 @@ object TaskResultVerificationManager extends Logging {
     val t0 = System.nanoTime()
     val v: Option[Long] =
       try {
+        SparkEnv.get.blockManager.registerTask(driverTaskId)
         TaskContext.setTaskContext(ctx)
         val it = rt.iteratorForVerification(ctx)
         while (it.hasNext) it.next()
@@ -807,6 +812,9 @@ object TaskResultVerificationManager extends Logging {
           case NonFatal(e) => logWarning(s"[CHUNK] completion listeners failed: ${e.getMessage}")
         }
         TaskContext.unset()
+        try SparkEnv.get.blockManager.releaseAllLocksForTask(driverTaskId) catch {
+          case NonFatal(e) => logWarning(s"[CHUNK] block lock release failed: ${e.getMessage}")
+        }
         try tmm.cleanUpAllAllocatedMemory() catch {
           case NonFatal(e) => logWarning(s"[CHUNK] memory cleanup failed: ${e.getMessage}")
         }
@@ -849,12 +857,15 @@ object TaskResultVerificationManager extends Logging {
       case Some(task) =>
         // Create TaskMemoryManager for driver execution (needed for shuffle reads)
         // Declare outside try block so it's in scope for finally block cleanup
+        val driverTaskId = driverTaskIds.getAndDecrement()
         val taskMemoryManager = new org.apache.spark.memory.TaskMemoryManager(
           SparkEnv.get.memoryManager,
-          -1L  // Special task ID for driver execution
+          driverTaskId
         )
 
         try {
+          // Block reads (cached blocks, broadcasts) take their locks under this task id
+          SparkEnv.get.blockManager.registerTask(driverTaskId)
           logInfo(s"[DRIVER RECOMPUTE] Running task on driver: partitionId=$partitionId")
 
           // Create minimal TaskContext for driver execution
@@ -862,7 +873,7 @@ object TaskResultVerificationManager extends Logging {
             stageId = task.stageId,
             stageAttemptNumber = task.stageAttemptId,  // Constructor uses stageAttemptNumber
             partitionId = task.partitionId,
-            taskAttemptId = -1L,  // Special ID for driver execution
+            taskAttemptId = driverTaskId,
             attemptNumber = 0,
             taskIndex = index1,   // Use replica 1's taskIndex
             taskMemoryManager = taskMemoryManager,  // Provide memory manager for shuffle reads
@@ -946,8 +957,14 @@ object TaskResultVerificationManager extends Logging {
             // Note: We don't report verdict here - let timeout handle it
             // The timeout is our safety net for all driver failures (including exceptions)
         } finally {
-          // Clean up TaskContext and TaskMemoryManager
+          // Clean up TaskContext, block locks and TaskMemoryManager
           TaskContext.unset()
+          try {
+            SparkEnv.get.blockManager.releaseAllLocksForTask(driverTaskId)
+          } catch {
+            case e: Exception =>
+              logWarning(s"[CLEANUP] Failed to release block locks: ${e.getMessage}")
+          }
           try {
             taskMemoryManager.cleanUpAllAllocatedMemory()
           } catch {
