@@ -35,6 +35,10 @@ import org.apache.spark.{Partition, TaskContext}
  * @param isOrderSensitive whether or not the function is order-sensitive. If it's order
  *                         sensitive, it may return totally different result when the input order
  *                         is changed. Mostly stateful functions are order-sensitive.
+ * @param isPointwise whether `f` is pointwise (map, filter, flatMap, mapValues, flatMapValues):
+ *                    each output depends only on the input it came from, and `f` pulls one
+ *                    input at a time. Chunk verification taps above a run of these
+ *                    (verification.TracePlan).
  */
 private[spark] class MapPartitionsRDD[U: ClassTag, T: ClassTag](
     var prev: RDD[T],
@@ -42,59 +46,15 @@ private[spark] class MapPartitionsRDD[U: ClassTag, T: ClassTag](
     preservesPartitioning: Boolean = false,
     isFromBarrier: Boolean = false,
     isOrderSensitive: Boolean = false,
-    isFilterOperation: Boolean = false,
-    isExpanderOperation: Boolean = false)  // For flatMap, flatMapValues (1→M)
+    private[spark] val isPointwise: Boolean = false)
   extends RDD[U](prev) {
 
   override val partitioner = if (preservesPartitioning) firstParent[T].partitioner else None
 
   override def getPartitions: Array[Partition] = firstParent[T].partitions
 
-  override def compute(split: Partition, context: TaskContext): Iterator[U] = {
-    val inputIter = firstParent[T].iterator(split, context)
-
-    // Handle different transformation categories with UID tracking
-    if (isFilterOperation) {
-      // Category 1: 1→0/1 (Droppers) - filter operations
-      // Dequeue UID per input; requeue only if kept
-      inputIter.flatMap { value =>
-        if (Trace.isCorrelationBroken) {
-          // No UID tracking - just apply filter
-          val result = f(context, split.index, Iterator(value))
-          if (result.hasNext) Some(result.next()) else None
-        } else {
-          val currentUid = Trace.dequeueUid()
-          val result = f(context, split.index, Iterator(value))
-          if (result.hasNext) {
-            Trace.enqueueUid(currentUid)
-            Some(result.next())
-          } else {
-            None
-          }
-        }
-      }
-    } else if (isExpanderOperation) {
-      // Category 2: 1→M (Expanders) - flatMap, flatMapValues operations  
-      // Each output element gets the same UID from its input (group-based semantics, lazy)
-      inputIter.flatMap { value =>
-        if (Trace.isCorrelationBroken) {
-          // No UID tracking - just apply flatMap
-          f(context, split.index, Iterator(value))
-        } else {
-          val currentUid = Trace.dequeueUid()
-          val result = f(context, split.index, Iterator(value))
-          result.map { element =>
-            Trace.enqueueUid(currentUid)  // Enqueue UID for each output element lazily
-            element
-          }
-        }
-      }
-    } else {
-      // Category 3: 1→1 (Safe Pass-through) - map, mapValues, keyBy
-      // No UID queue changes needed - just pass through
-      f(context, split.index, inputIter)
-    }
-  }
+  override def compute(split: Partition, context: TaskContext): Iterator[U] =
+    f(context, split.index, firstParent[T].iterator(split, context))
 
   override def clearDependencies(): Unit = {
     super.clearDependencies()

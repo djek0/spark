@@ -109,6 +109,11 @@ private[spark] class VerificationTask(
    * This ensures all verification logic runs on the executor, not the driver.
    */
   override def runTask(context: TaskContext): VerificationVerdict = {
+    // This task's own context runs a full-task recompute below: a verifier, not a replica
+    context match {
+      case c: TaskContextImpl => c.fullTaskVerifier = true
+      case _ =>
+    }
     if (targetRange.isDefined && chunkBoxes.isDefined) return runChunkVerification(context)
 
     logInfo(s"[VERIFICATION] Running full-task verification for partition $partitionId on executor ${context.taskAttemptId()}")

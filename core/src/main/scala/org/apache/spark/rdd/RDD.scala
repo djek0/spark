@@ -259,32 +259,6 @@ abstract class RDD[T: ClassTag](
   }
 
   /**
-   * Check if this RDD is a collapser that breaks per-element UID tracking.
-   * Collapsers change element count/structure and should be excluded from UID tracking.
-   * This includes all transformations that break UID determinism or order guarantees.
-   */
-  private def isCollapserRDD: Boolean = {
-    val className = this.getClass.getSimpleName
-    className match {
-      // Repartitioning transformations (merge N parent partitions → 1 output partition within stage)
-      case "CoalescedRDD" => true
-      // Cross-product transformations (reads from 2 input iterators simultaneously)
-      case "CartesianRDD" => true
-      // Zipping transformations (reads from N input iterators, cannot determine single UID)
-      case name if name.startsWith("ZippedPartitionsRDD") => true
-      // Shuffle read transformations (reads shuffled data from previous stage, UID continuity lost)
-      case "ShuffledRDD" => true
-      // Multi-source transformations (reads from multiple RDDs simultaneously, UID collapse)
-      case "CoGroupedRDD" => true
-      case "SubtractedRDD" => true
-      // Sampling transformations (non-deterministic - each execution samples different elements)
-      case "PartitionwiseSampledRDD" => true
-      // Default: safe for UID tracking within the stage
-      case _ => false
-    }
-  }
-
-  /**
    * Get the list of dependencies of this RDD ignoring checkpointing.
    */
   final private def internalDependencies: Option[Seq[Dependency[_]]] = {
@@ -346,200 +320,14 @@ abstract class RDD[T: ClassTag](
    * subclasses of RDD.
    */
   final def iterator(split: Partition, context: TaskContext): Iterator[T] = {
-    val isOutermost = Trace.enterIter()
-    try {
-      val it = if (storageLevel != StorageLevel.NONE) {
-        getOrCompute(split, context)
-      } else {
-        computeOrReadCheckpoint(split, context)
-      }
-
-      // Update backup iterator if this RDD is safe for UID tracking
-      // This happens at every recursion level, not just outermost
-      // Only update if correlation hasn't been broken yet
-      // Verification tasks ALSO need to build backup iterators for single-element verification
-      
-      // Check if this is a stage root (same logic as in computeOrReadCheckpoint)
-      val isStageRoot = dependencies.isEmpty ||
-        dependencies.forall(_.isInstanceOf[ShuffleDependency[_, _, _]])
-      
-      logWarning(s"[BACKUP-DEBUG] Stage ${context.stageId} partition ${split.index}: " +
-        s"RDD=${this.getClass.getSimpleName}, isCollapser=$isCollapserRDD, " +
-        s"isStageRoot=$isStageRoot, correlationBroken=${Trace.isCorrelationBroken}")
-      
-      if (!Trace.isCorrelationBroken) {
-        val isSafe = !isCollapserRDD
-        // Save backup for each safe RDD - the LAST safe RDD wins (ThreadLocal)
-        if (isSafe) {
-          logWarning(s"[BACKUP-DEBUG] SAVING backup iterator for stage ${context.stageId}," +
-            s" partition ${split.index}, iterator ${it.getClass.getSimpleName}")
-          Trace.updateBackupIterator(it)
-        } else if (!isStageRoot) {
-          // Mark correlation as permanently broken when encountering a collapser
-          // UNLESS this is a stage root (which starts a fresh UID sequence for this stage)
-          logWarning(s"[BACKUP-DEBUG] MARKING BROKEN for stage ${context.stageId}," +
-            s" partition ${split.index}, iterator ${it.getClass.getSimpleName}")
-          Trace.markCorrelationBroken()
-        } else {
-          // Stage root collapser: don't mark broken (it starts fresh UID sequence for this stage)
-          logWarning(s"[BACKUP-DEBUG] SKIPPING mark broken for stage root ${this.getClass.getSimpleName} " +
-            s"at stage ${context.stageId}, partition ${split.index}")
-        }
-      } else {
-        logWarning(s"[BACKUP-DEBUG] SKIPPING (already broken) for stage ${context.stageId}," +
-          s" partition ${split.index}")
-      } 
-
-      // Get app name safely from SparkEnv
-      val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
-      // println("appName: " + appName)
-
-      if (isOutermost) {
-        if (!Trace.isCorrelationBroken && !context.isVerificationTask) {
-          // Case A: All transformations safe - log with outermost iterator
-          // No collapser encountered, queue is in correct state
-          // The chunk digest (null in trees mode) is filled at the same point and with the
-          // same UID as the finals file.
-          val digest = org.apache.spark.verification.ChunkConfig.newDigest(context)
-          val outWriter =
-            if (org.apache.spark.verification.ChunkConfig.writeTraceFiles) {
-              val w = Trace.createOutputWriter(
-                stageId = context.stageId,
-                partitionId = split.index,
-                taskIndex = context.taskIndex(),
-                appName = appName
-              )
-              Option(context).foreach { ctx =>
-                ctx.addTaskCompletionListener[Unit](_ => try w.safeClose() catch {
-                  case _: Throwable => ()
-                })
-              }
-              w
-            } else null
-
-          logInfo(s"[UID TRACKING] Logging with outermost iterator (all transformations safe)")
-
-          // Wrap the outermost iterator for logging: one UID dequeue per element, exactly as
-          // Trace.logOutput does, then the finals record and/or the digest term.
-          new Iterator[T] {
-            override def hasNext: Boolean = {
-              val h = it.hasNext
-              if (!h && digest != null) digest.exhausted = true
-              h
-            }
-            override def next(): T = {
-              val elem = it.next()
-              val uid = Trace.dequeueUid()
-              if (digest != null) digest.add(uid, elem)
-              if (outWriter != null) outWriter.writeEntry(uid, elem)
-              elem
-            }
-          }
-        } else {
-          // Case B: Correlation broken - use backup iterator or UNSAFE_STAGE
-          val backupIt = Trace.getBackupIterator[T]()
-          logWarning(s"[BACKUP-DEBUG] At outermost for stage ${context.stageId} partition ${split.index}: " +
-            s"backupIt=${if (backupIt.isDefined) "FOUND" else "NONE"}, " +
-            s"isVerificationTask=${context.isVerificationTask}")
-          
-          backupIt match {
-            case Some(backupIt) if context.isVerificationTask =>
-              // Verification task with backup iterator available
-              Trace.restoreBackupQueue()
-              
-              context match {
-                case ctx: TaskContextImpl if ctx.targetRange.isDefined && ctx.rangeBox != null =>
-                  // Chunk verification: fingerprint the chunk where the replicas logged
-                  backupIt.map { elem =>
-                    val uid = Trace.dequeueUid()
-                    ctx.rangeBox.add(uid, elem)
-                    elem
-                  }
-
-                case _ =>
-                  // Full-task verification: just return iterator without logging
-                  logDebug(s"[VERIFICATION] Full-task verification, returning iterator without logging")
-                  it
-              }
-            
-            case Some(backupIt) =>
-              // Normal task with backup iterator: use it for logging
-              Trace.restoreBackupQueue()
-              
-              val outWriter = Trace.createOutputWriter(
-                stageId = context.stageId,
-                partitionId = split.index,
-                taskIndex = context.taskIndex(),
-                appName = appName
-              )
-              Option(context).foreach { ctx =>
-                ctx.addTaskCompletionListener[Unit](_ => try outWriter.safeClose() catch {
-                  case _: Throwable => ()
-                })
-              }
-
-              logInfo(s"[BACKUP ITERATOR] Using backup iterator for logging (outer is ${this.getClass.getSimpleName})")
-
-              // Wrap backup iterator for logging
-              val loggedBackup = backupIt.map { elem =>
-                Trace.logOutput(
-                  writer = outWriter,
-                  stageId = context.stageId,
-                  partitionId = split.index,
-                  taskId = context.taskAttemptId(),
-                  attempt = context.attemptNumber,
-                  value = elem
-                )
-                elem
-              }
-
-              // Materialize backup iterator to ensure logging happens
-              loggedBackup.foreach(_ => ())
-
-              // Return original iterator for actual computation
-              it
-
-            case None if context.isVerificationTask =>
-              context match {
-                case ctx: TaskContextImpl if ctx.targetRange.isDefined && ctx.rangeBox != null =>
-                  // Chunk verification of a stage that is only a collapser root: the replicas
-                  // logged at `it` (Case A), so fingerprint the chunk there
-                  it.map { elem =>
-                    val uid = Trace.dequeueUid()
-                    ctx.rangeBox.add(uid, elem)
-                    elem
-                  }
-                case _ =>
-                  // Verification task with no backup iterator: just return iterator
-                  logDebug(s"[VERIFICATION] No backup iterator for verification task, returning iterator")
-                  it
-              }
-
-            case None =>
-              // Normal task with no backup iterator: write UNSAFE_STAGE marker
-              logWarning(s"[BACKUP ITERATOR] No safe iterator found for stage ${context.stageId}, partition ${split.index} - writing UNSAFE_STAGE marker")
-              val outWriter = Trace.createOutputWriter(
-                stageId = context.stageId,
-                partitionId = split.index,
-                taskIndex = context.taskIndex(),
-                appName = appName
-              )
-              Option(context).foreach { ctx =>
-                ctx.addTaskCompletionListener[Unit](_ => try outWriter.safeClose() catch {
-                  case _: Throwable => ()
-                })
-              }
-              // Write sentinel value to mark unsafe stage
-              outWriter.writeEntry(UnsafeStageMarkers.UNSAFE_STAGE_UID, "UNSAFE_STAGE")
-              it
-          }
-        }
-      } else {
-        it
-      }
-    } finally {
-      Trace.exitIter()
+    // Thesis: chunk verification hooks (verification.TraceTap); untraced tasks pass through
+    org.apache.spark.verification.TraceTap.enter(this, context)
+    val it = if (storageLevel != StorageLevel.NONE) {
+      getOrCompute(split, context)
+    } else {
+      computeOrReadCheckpoint(split, context)
     }
+    org.apache.spark.verification.TraceTap.leave(this, split, context, it)
   }
 
   /**
@@ -569,86 +357,13 @@ abstract class RDD[T: ClassTag](
   /**
    * Compute an RDD partition or read it from a checkpoint if the RDD is checkpointing.
    */
-  private[spark] def computeOrReadCheckpoint(split: Partition, context: TaskContext): Iterator[T] = {
+  private[spark] def computeOrReadCheckpoint(split: Partition, context: TaskContext): Iterator[T] =
+  {
     if (isCheckpointedAndMaterialized) {
       firstParent[T].iterator(split, context)
     } else {
-      val baseIter = compute(split, context)
-      
-      // Check if this is a stage root (either no dependencies or all dependencies are ShuffleDependencies)
-      val isStageRoot = dependencies.isEmpty ||
-        dependencies.forall(_.isInstanceOf[ShuffleDependency[_, _, _]])
-
-      logWarning(s"[INIT-DEBUG] Stage ${context.stageId} partition ${split.index}: " +
-        s"RDD=${this.getClass.getSimpleName}, isStageRoot=$isStageRoot, " +
-        s"dependencies=${dependencies.map(_.getClass.getSimpleName).mkString(", ")}")
-
-      if (isStageRoot) {
-        // Initialize UID tracking for this stage
-        logWarning(s"[INIT-DEBUG] CALLING initForTask() for ${this.getClass.getSimpleName} " +
-          s"at stage ${context.stageId} partition ${split.index}")
-        Trace.initForTask()
-
-        // Check if this is a verification task
-        context match {
-          case ctx: TaskContextImpl if ctx.targetRange.isDefined =>
-            // Chunk verification: same UID counter and order as the replicas, but only UIDs in
-            // [lo, hi) are passed on (and enqueued) downstream
-            val (lo, hi) = ctx.targetRange.get
-            baseIter.flatMap { value =>
-              val uid = Trace.generateUid()
-              if (uid >= lo && uid < hi) {
-                Trace.enqueueUid(uid)
-                Some(value)
-              } else {
-                None
-              }
-            }
-
-          case _ =>
-            // Normal mode: track UIDs and optionally log full input values
-            val debugMode = sys.env.getOrElse("DEBUG_MODE", "false").toBoolean
-            
-            if (debugMode) {
-              // Debug mode: log full input values to disk
-              val appName = Option(SparkEnv.get).flatMap(env => Option(env.conf.get("spark.app.name", "unknown"))).getOrElse("unknown")
-              val inputWriter = Trace.createInputWriter(
-                stageId = context.stageId,
-                partitionId = split.index,
-                taskIndex = context.taskIndex(),
-                appName = appName
-              )
-              Option(context).foreach { ctx =>
-                ctx.addTaskCompletionListener[Unit](_ => try {
-                  inputWriter.safeClose()
-                  Trace.commitLogs(inputWriter)
-                } catch { case _: Throwable => () })
-              }
-
-              baseIter.map { value =>
-                // Log input with UID for each element
-                Trace.logInput(
-                  inputWriter,
-                  context.stageId,
-                  split.index,
-                  context.taskAttemptId(),
-                  context.attemptNumber,
-                  value
-                )
-                value
-              }
-            } else {
-              // Production mode: track UIDs for output correlation, but don't write input values to disk
-              baseIter.map { value =>
-                val uid = Trace.generateUid()
-                Trace.enqueueUid(uid)  // Must enqueue for output correlation
-                value
-              }
-            }
-        }
-      } else {
-        baseIter
-      }
+      // Thesis: the stage root counts its elements for the tap (verification.TraceTap)
+      org.apache.spark.verification.TraceTap.atRoot(this, split, context, compute(split, context))
     }
   }
 
@@ -666,36 +381,9 @@ abstract class RDD[T: ClassTag](
       // Block hit.
       case Left(blockResult) =>
         if (readCachedBlock) {
-          // Check if this cached RDD is a stage root
-          val isStageRoot = dependencies.isEmpty ||
-            dependencies.forall(_.isInstanceOf[ShuffleDependency[_, _, _]])
-          
-          if (isStageRoot) {
-            // Initialize UID tracking for stage root (even though we're reading from cache)
-            Trace.initForTask()
-            logInfo(s"[CACHE HIT] Stage root cache hit - initialized queue for stage ${context.stageId}, partition ${partition.index}")
-          }
-          
-          // Always mark correlation broken on cache hit (cached data has no UID correlation)
-          Trace.markCorrelationBroken()
-          logInfo(s"[CACHE HIT] Marked correlation broken for stage ${context.stageId}, partition ${partition.index}")
-          
           val existingMetrics = context.taskMetrics().inputMetrics
           existingMetrics.incBytesRead(blockResult.bytes)
-          
-          // Wrap cached iterator to enqueue dummy UIDs if stage root
-          // This prevents downstream transformations from hitting queue underflow
-          val cachedIter = blockResult.data.asInstanceOf[Iterator[T]]
-          val wrappedIter = if (isStageRoot) {
-            cachedIter.map { elem =>
-              Trace.enqueueUid(Trace.generateUid())
-              elem
-            }
-          } else {
-            cachedIter
-          }
-          
-          new InterruptibleIterator[T](context, wrappedIter) {
+          new InterruptibleIterator[T](context, blockResult.data.asInstanceOf[Iterator[T]]) {
             override def next(): T = {
               existingMetrics.incRecordsRead(1)
               delegate.next()
@@ -725,7 +413,7 @@ abstract class RDD[T: ClassTag](
    */
   def map[U: ClassTag](f: T => U): RDD[U] = withScope {
     val cleanF = sc.clean(f)
-    new MapPartitionsRDD[U, T](this, (_, _, iter) => iter.map(cleanF))
+    new MapPartitionsRDD[U, T](this, (_, _, iter) => iter.map(cleanF), isPointwise = true)
   }
 
   /**
@@ -737,7 +425,7 @@ abstract class RDD[T: ClassTag](
     new MapPartitionsRDD[U, T](
       this, 
       (_, _, iter) => iter.flatMap(cleanF),
-      isExpanderOperation = true)  // Mark as expander operation for UID tracking
+      isPointwise = true)
   }
 
   /**
@@ -749,7 +437,7 @@ abstract class RDD[T: ClassTag](
       this,
       (_, _, iter) => iter.filter(cleanF),
       preservesPartitioning = true,
-      isFilterOperation = true)
+      isPointwise = true)
   }
 
   /**
@@ -908,30 +596,10 @@ abstract class RDD[T: ClassTag](
    * @return A random sub-sample of the RDD without replacement.
    */
   private[spark] def randomSampleWithRange(lb: Double, ub: Double, seed: Long): RDD[T] = {
-    this.mapPartitionsWithIndex( { (index: Int, partition: Iterator[T]) =>
+    this.mapPartitionsWithIndex( { (index, partition) =>
       val sampler = new BernoulliCellSampler[T](lb, ub)
       sampler.setSeed(seed + index)
-
-      // Implement UID tracking for range sampling operations
-      partition.flatMap { value =>
-        if (Trace.isCorrelationBroken) {
-          // No UID tracking - just apply sampling
-          val sampleCount = sampler.sample()
-          if (sampleCount > 0) Some(value) else None
-        } else {
-          val currentUid = Trace.dequeueUid()
-          val sampleCount = sampler.sample()
-
-          if (sampleCount > 0) {
-            // Element selected - preserve original UID
-            Trace.enqueueUid(currentUid)
-            Some(value)
-          } else {
-            // Element not selected - UID is discarded (not re-enqueued)
-            None
-          }
-        }
-      }
+      sampler.sample(partition)
     }, isOrderSensitive = true, preservesPartitioning = true)
   }
 

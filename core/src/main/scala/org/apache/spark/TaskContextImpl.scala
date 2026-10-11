@@ -68,6 +68,18 @@ private[spark] class TaskContextImpl(
   /** This task's chunk digest (chunk verification); null when digests are off. */
   @transient private[spark] var chunkDigest: org.apache.spark.verification.ChunkDigest = null
 
+  /** Where this task traces (verification.TracePlan); null until its first RDD.iterator call. */
+  @transient private[spark] var tracePlan: org.apache.spark.verification.TracePlan = null
+
+  /** Root elements handed out so far: the tap's element has UID rootPos - 1. */
+  @transient private[spark] var rootPos: Long = 0L
+
+  /** Elements in the root's partition when known (a parallelize root), else -1. */
+  @transient private[spark] var rootSize: Long = -1L
+
+  /** A full-task verification recompute: traced like a replica, but never writes trace files. */
+  @transient private[spark] var fullTaskVerifier: Boolean = false
+
   /** List of callback functions to execute when the task completes. */
   @transient private val onCompleteCallbacks = new ArrayBuffer[TaskCompletionListener]
 

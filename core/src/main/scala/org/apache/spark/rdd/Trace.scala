@@ -19,209 +19,22 @@ package org.apache.spark.rdd
 
 import java.io.File
 import java.nio.file.{Files, StandardCopyOption}
-import java.util.ArrayDeque
-import java.util.concurrent.atomic.AtomicLong
 import scala.util.Properties.envOrElse
 
 import org.apache.spark.internal.Logging
 import org.apache.spark.util.{FileFormatUtils, SafeWriter}
 
 /**
- * Sentinel values for special stage conditions.
- */
-object UnsafeStageMarkers {
-  // Marker for stages with no safe transformations (e.g., only ShuffledRDD)
-  val UNSAFE_STAGE_UID: Long = -99999L
-  val UNSAFE_STAGE_HASH: Int = Int.MinValue  // -2147483648
-  
-  // Marker for truly empty partitions
-  val EMPTY_PARTITION_UID: Long = -1L
-  val EMPTY_PARTITION_HASH: Int = 0
-}
-
-/**
- * Companion object for UID tracking and logging.
+ * Optional per-element trace files (DEBUG_MODE or CHUNK_KEEP_TRACE_FILES): the tap
+ * (verification.TraceTap) writes uid|value records; ResultTask and ShuffleMapTask commit them.
  */
 private[spark] object Trace extends Logging {
-  // Thread-local state for UID management
-  private val uidCounterTL = new ThreadLocal[AtomicLong] {
-    override def initialValue() = new AtomicLong(0L)
-  }
-  private val uidQueueTL = new ThreadLocal[java.util.ArrayDeque[Long]] {
-    override def initialValue() = new java.util.ArrayDeque[Long]()
-  }
-  
-  // Iterator depth tracking for detecting outermost iterator
-  private val depthTL = new ThreadLocal[AtomicLong] {
-    override def initialValue(): AtomicLong = new AtomicLong(0L)
-  }
-
-  // Backup iterator tracking for fallback logging
-  // Stores the last safe iterator encountered during recursive evaluation
-  private val backupIteratorTL = new ThreadLocal[Option[Iterator[Any]]] {
-    override def initialValue(): Option[Iterator[Any]] = None
-  }
-
-  // Backup queue - snapshot of UID queue when backup iterator is set
-  // This preserves the queue state at the last safe transformation point
-  private val backupQueueTL = new ThreadLocal[ArrayDeque[Long]] {
-    override def initialValue(): ArrayDeque[Long] = new ArrayDeque[Long]()
-  }
-
-  // Correlation broken flag - once set, UID correlation is permanently lost
-  // for this iterator traversal and cannot be restored by downstream transformations
-  private val correlationBrokenTL = new ThreadLocal[Boolean] {
-    override def initialValue(): Boolean = false
-  }
-
-  // Thread-local accessors
-  private def q = uidQueueTL.get()
-  private def ctr = uidCounterTL.get()
-  
-  private[rdd] def enterIter(): Boolean = {
-    val d = depthTL.get().getAndIncrement() // fetch old value, then increment
-    if (d == 0) {
-      // Starting new outermost traversal - reset correlation state
-      correlationBrokenTL.set(false)
-    }
-    d == 0 // true ⇒ this is the outermost iterator
-  }
-  
-  private[rdd] def exitIter(): Unit = {
-    depthTL.get().decrementAndGet()
-  }
-
-  /**
-   * Update the backup iterator if the current iterator is safe.
-   * Called from RDD.iterator() when encountering a safe transformation.
-   * Only updates if UID correlation hasn't been broken yet.
-   * Also snapshots the current UID queue state for restoration during logging.
-   */
-  private[rdd] def updateBackupIterator[T](iterator: Iterator[T]): Unit = {
-    if (!isCorrelationBroken) {
-      backupIteratorTL.set(Some(iterator.asInstanceOf[Iterator[Any]]))
-      // Snapshot the current queue state
-      val backupQueue = new ArrayDeque[Long](q)
-      backupQueueTL.set(backupQueue)
-    }
-  }
-
-  /**
-   * Get the backup iterator for fallback logging.
-   * Returns None if no safe iterator has been encountered.
-   */
-  private[rdd] def getBackupIterator[T](): Option[Iterator[T]] = {
-    backupIteratorTL.get().asInstanceOf[Option[Iterator[T]]]
-  }
-
-  /**
-   * Clear the backup iterator reference.
-   * Called at task initialization.
-   */
-  private[rdd] def clearBackupIterator(): Unit = {
-    backupIteratorTL.set(None)
-  }
-
-  /**
-   * Mark UID correlation as permanently broken for this iterator traversal.
-   * Called when encountering a collapser transformation that destroys UID correspondence.
-   * Once set, downstream transformations cannot restore UID correlation.
-   */
-  private[rdd] def markCorrelationBroken(): Unit = {
-    val wasAlreadyBroken = correlationBrokenTL.get()
-    correlationBrokenTL.set(true)
-    // Use System.err to ensure it appears in logs even with log level filtering
-    System.err.println(s"[CORRELATION-DEBUG] markCorrelationBroken called (was already broken: $wasAlreadyBroken)")
-  }
-
-  /**
-   * Check if UID correlation has been broken in this iterator traversal.
-   */
-  private[rdd] def isCorrelationBroken: Boolean = {
-    correlationBrokenTL.get()
-  }
-
-  /**
-   * Restore the UID queue to the backup state.
-   * Called before logging the backup iterator to ensure correct UID correlation.
-   */
-  private[rdd] def restoreBackupQueue(): Unit = {
-    q.clear()
-    backupQueueTL.get().forEach(q.add(_))
-  }
-
-  /**
-   * Initialize UID tracking for a new task.
-   * Must be called at the beginning of each task.
-   */
-  def initForTask(): Unit = {
-    val wasBroken = correlationBrokenTL.get()
-    q.clear()
-    ctr.set(0L)
-    clearBackupIterator()
-    backupQueueTL.set(new ArrayDeque[Long]())
-    correlationBrokenTL.set(false)
-    // Use System.err to ensure it appears in logs even with log level filtering
-    System.err.println(s"[CORRELATION-DEBUG] initForTask called (correlation was broken: $wasBroken, now reset to false)")
-  }
-
-  /**
-   * Clean up UID tracking state.
-   * Called automatically on task completion.
-   */
-  def cleanupForTask(): Unit = {
-    q.clear()
-    ctr.set(0L)
-    clearBackupIterator()
-    correlationBrokenTL.set(false)
-  }
-
-  // UID management
-  private[rdd] def enqueueUid(uid: Long): Unit = q.addLast(uid)
-  
-  private[rdd] def dequeueUid(): Long = {
-    if (q.isEmpty) {
-      throw new IllegalStateException("UID queue underflow - check your filter operations")
-    }
-    q.removeFirst()
-  }
-  
-  private[rdd] def generateUid(): Long = ctr.getAndIncrement()
-
   // track the writers so we can commit their logs all at the end of the task
   // Changed to List to support multiple writers per thread (input + output)
   private val activeWriters = new java.util.concurrent.ConcurrentHashMap[String, java.util.List[SafeWriter]]()
 
-  def getActiveWriters(threadName: String): java.util.List[SafeWriter] = activeWriters.get(threadName)
-  
   // Debug mode: set to true for human-readable text files (slower), false for binary (faster)
   private val DEBUG_MODE = envOrElse("DEBUG_MODE", "false").toBoolean
-
-  /**
-   * Create a new writer for input logging.
-   * The writer must be explicitly closed when done.
-   * Uses binary format by default for performance (2-5x faster).
-   * Set -Dspark.trace.debugMode=true for human-readable text files.
-   * Writes to .tmp file first, renamed to final on commit.
-   */
-  def createInputWriter(stageId: Int, partitionId: Int, taskIndex: Int, appName: String): SafeWriter = {
-    val finalDir = if (DEBUG_MODE) "logs" else "bins"
-    val dir = new File(s"${FileFormatUtils.buildTraceBaseDir()}/$appName/$finalDir")
-    dir.mkdirs()  // Ensure directory exists
-    // Always write to .tmp first for atomic commit
-    val file = new File(dir, s"spark_inputs_stage${stageId}_idx${taskIndex}_p${partitionId}.tmp")
-    val writer = new SafeWriter(file, binary = !DEBUG_MODE)
-    
-    // Add writer to the list for this thread
-    val threadName = Thread.currentThread().getName
-    activeWriters.compute(threadName, (_, existing) => {
-      val list = if (existing == null) new java.util.ArrayList[SafeWriter]() else existing
-      list.add(writer)
-      list
-    })
-    
-    writer
-  }
 
   /**
    * Create a new writer for output logging.
@@ -247,47 +60,6 @@ private[spark] object Trace extends Logging {
     })
     
     writer
-  }
-
-  /**
-   * Create an empty finals file when no safe iterator exists for UID tracking.
-   * This ensures verifier compatibility by creating the expected file structure.
-   */
-  def createEmptyFinalsFile(stageId: Int, partitionId: Int, taskIndex: Int, appName: String): Unit = {
-    val writer = createOutputWriter(stageId, partitionId, taskIndex, appName)
-    try {
-      writer.safeClose()  // Close immediately to create empty file
-      logInfo(s"[BACKUP ITERATOR] Created empty finals file for stage $stageId, partition $partitionId (no safe iterator)")
-    } catch {
-      case e: Exception =>
-        logWarning(s"[BACKUP ITERATOR] Failed to create empty finals file: ${e.getMessage}")
-    }
-  }
-
-  // Logging operations
-  def logInput(
-      writer: SafeWriter,
-      stageId: Int,
-      partitionId: Int,
-      taskId: Long,
-      attempt: Int,
-      value: Any
-  ): Unit = {
-    val uid = generateUid()
-    enqueueUid(uid)
-    writer.writeEntry(uid, value)
-  }
-
-  def logOutput(
-      writer: SafeWriter,
-      stageId: Int,
-      partitionId: Int,
-      taskId: Long,
-      attempt: Int,
-      value: Any
-  ): Unit = {
-    val uid = dequeueUid()
-    writer.writeEntry(uid, value)
   }
 
   /**

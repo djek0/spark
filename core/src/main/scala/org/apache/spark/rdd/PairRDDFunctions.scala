@@ -753,7 +753,7 @@ class PairRDDFunctions[K, V](self: RDD[(K, V)])
     val cleanF = self.context.clean(f)
     new MapPartitionsRDD[(K, U), (K, V)](self,
       (context, pid, iter) => iter.map { case (k, v) => (k, cleanF(v)) },
-      preservesPartitioning = true)
+      preservesPartitioning = true, isPointwise = true)
   }
 
   /**
@@ -767,7 +767,7 @@ class PairRDDFunctions[K, V](self: RDD[(K, V)])
         cleanF(v).map(x => (k, x))
       },
       preservesPartitioning = true,
-      isExpanderOperation = true)  // Mark as expander operation for UID tracking
+      isPointwise = true)
   }
 
   /**

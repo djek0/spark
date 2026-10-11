@@ -871,6 +871,7 @@ object TaskResultVerificationManager extends Logging {
             taskMetrics = TaskMetrics.empty,  // Constructor uses taskMetrics, not metrics
             resources = Map.empty
           )
+          driverTaskContext.fullTaskVerifier = true   // a verifier: writes no replica trace files
 
           // Set the context
           TaskContext.setTaskContext(driverTaskContext)

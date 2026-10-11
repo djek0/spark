@@ -254,9 +254,9 @@ object ChunkConfig {
     val v = Try(env("CHUNK_MAX", "1024").toInt).getOrElse(1024)
     Integer.highestOneBit(math.min(math.max(v, 2), 1 << 16))
   }
-  /** In chunks mode no code reads Case A trace files, so they are off unless asked for. */
   lazy val keepTraceFiles: Boolean = bool("CHUNK_KEEP_TRACE_FILES", false)
-  lazy val writeTraceFiles: Boolean = !useChunks || keepTraceFiles || bool("DEBUG_MODE", false)
+  /** Trace files are a debugging aid: with Merkle verification on, and only when asked for. */
+  lazy val writeTraceFiles: Boolean = merkleOn && (keepTraceFiles || bool("DEBUG_MODE", false))
 
   /** Called by the logging point. Returns the task's new digest, or null when digests are off. */
   def newDigest(context: TaskContext): ChunkDigest = context match {
