@@ -142,6 +142,7 @@ private[spark] class SafeWriter(
    * This ensures deterministic string representation across executors.
    */
   private def formatValueWithArrays(value: Any): String = value match {
+    case null => "null"   // a null element (or a null inside a tuple) is written, not an NPE
     case arr: Array[_] => arr.mkString("[", ",", "]")
     case prod: Product => 
       // Handle tuples and case classes - recursively format nested arrays
