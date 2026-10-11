@@ -322,7 +322,11 @@ abstract class RDD[T: ClassTag](
   final def iterator(split: Partition, context: TaskContext): Iterator[T] = {
     // Thesis: chunk verification hooks (verification.TraceTap); untraced tasks pass through
     org.apache.spark.verification.TraceTap.enter(this, context)
-    val it = if (storageLevel != StorageLevel.NONE) {
+    // Thesis: a verifier recomputes a persisted RDD rather than read the cache a replica filled; a
+    // materialized checkpoint has no lineage left to recompute, so it is still read
+    val it = if (storageLevel != StorageLevel.NONE &&
+        !(org.apache.spark.verification.TraceTap.isVerifier(context) &&
+          !isCheckpointedAndMaterialized)) {
       getOrCompute(split, context)
     } else {
       computeOrReadCheckpoint(split, context)

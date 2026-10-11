@@ -132,6 +132,12 @@ private[spark] object TraceTap extends Logging {
       case _ => it
     }
 
+  /** A verification recompute (full-task or chunk): it must not read data a replica produced. */
+  def isVerifier(context: TaskContext): Boolean = context match {
+    case ctx: TaskContextImpl => ctx.fullTaskVerifier || ctx.targetRange.isDefined
+    case _ => false
+  }
+
   private def planOf(top: RDD[_], ctx: TaskContextImpl): TracePlan = {
     val plan =
       try TracePlan.of(top) catch {
