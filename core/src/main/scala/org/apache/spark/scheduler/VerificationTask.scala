@@ -208,13 +208,16 @@ private[spark] class VerificationTask(
     val verifierBox: Option[Long] =
       try {
         TaskContext.setTaskContext(rangeCtx)
-        originalTask match {
-          case rt: ResultTask[_, _] =>
-            val it = rt.iteratorForVerification(rangeCtx)
-            while (it.hasNext) it.next()  // drain the chunk; no action runs
-            Some(rangeCtx.rangeBox.sum)
-          case _ =>
-            None  // map stages are not chunk-eligible yet
+        // Drain only the chunk: neither the action nor the shuffle writer runs
+        val it: Iterator[_] = originalTask match {
+          case rt: ResultTask[_, _] => rt.iteratorForVerification(rangeCtx)
+          case smt: ShuffleMapTask => smt.iteratorForVerification(rangeCtx)
+          case _ => null
+        }
+        if (it == null) None
+        else {
+          while (it.hasNext) it.next()
+          Some(rangeCtx.rangeBox.sum)
         }
       } catch {
         case NonFatal(e) =>

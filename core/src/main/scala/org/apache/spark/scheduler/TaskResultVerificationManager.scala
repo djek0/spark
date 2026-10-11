@@ -384,10 +384,8 @@ object TaskResultVerificationManager extends Logging {
     // Check if stage READS from shuffle (driver cannot execute such tasks due to null taskMemoryManager)
     val involvesShuffleOps = stageReadsFromShuffle(stageId)
     
-    // Note: ShuffleMapTask (shuffle-WRITE stages) are handled separately:
-    // - They might have hidden collapser transformations (e.g., sortByKey sampling)
-    // - Chunk verification is skipped for them (isFinalStage)
-    // - Full-task verification is used instead
+    // Map stages (shuffle WRITE) count as shuffle stages too, so in driver mode they also switch to
+    // the third executor, which verifies them by chunks when their replicas sent digests
 
     // Auto-switch to executor verification if driver verification was requested but stage READS from shuffle
     if (involvesShuffleOps && !useExecutorVerification) {
@@ -452,22 +450,12 @@ object TaskResultVerificationManager extends Logging {
 
       case Some(task) =>
         try {
-          // Determine verification strategy based on stage position:
-          // - Final stages: Use Merkle (safe, deterministic transformations only)
-          // - Intermediate stages: Use full-task (may contain pseudo-deterministic ops like seeded sampling)
-          val isFinalStage = dagScheduler.isFinalStage(stageId)
-          val shouldUseMerkle = useMerkleVerification && isFinalStage
-          
           logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: Task type = ${task.getClass.getSimpleName}")
-          logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: isFinalStage = $isFinalStage")
-          logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: useMerkleVerification = $useMerkleVerification")
-          logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: shouldUseMerkle = $shouldUseMerkle")
-          
-          if (!isFinalStage && useMerkleVerification) {
-            logInfo(s"[VERIFICATION] Stage $stageId is intermediate - using FULL-TASK verification")
-          }
-          
-          if (shouldUseMerkle && ChunkConfig.useChunks) {
+
+          // Chunk verification for every stage whose replicas sent digests (the executors' trace
+          // plan decides which stages are traced); chunkLocalize sends everything it cannot
+          // localize (no digest, equal digests, a partly read stream) to full-task verification
+          if (ChunkConfig.useChunks) {
             // Chunk mode: localize with the replicas' digests (no tree round), then one verifier
             // recomputes only that chunk; anything unsure goes to full-task
             chunkLocalize(stageId, index1, index2, partitionId) match {
@@ -479,7 +467,7 @@ object TaskResultVerificationManager extends Logging {
             }
           } else {
             // Full task verification on third executor
-            logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: ✓ Using FULL-TASK verification (isFinalStage=$isFinalStage)")
+            logDebug(s"[DISPATCH] Stage $stageId partition $partitionId: ✓ Using FULL-TASK verification (MERKLE_VERIFICATION=false)")
             submitVerificationTaskToExecutor(task, index1, index2, excludedExecutors, taskScheduler)
             logInfo(s"[THIRD-EXECUTOR] Full task verification submitted, will process result when complete")
           }
@@ -706,19 +694,14 @@ object TaskResultVerificationManager extends Logging {
       .orElse(stageIndexToOriginalTask.get((stageId, index2)))
     val isShuffleMapTask = taskOpt.exists(_.isInstanceOf[ShuffleMapTask])
     val readsFromShuffle = stageReadsFromShuffle(stageId)
-    val isFinalStage = dagScheduler.isFinalStage(stageId)
     val driverCanExecute = !isShuffleMapTask && !readsFromShuffle
-    val shouldUseMerkle = useMerkleVerification && isFinalStage && driverCanExecute
-    
-    logDebug(s"[DRIVER] Stage $stageId partition $partitionId: isFinalStage = $isFinalStage")
+    val shouldUseMerkle = ChunkConfig.useChunks && driverCanExecute
+
     logDebug(s"[DRIVER] Stage $stageId partition $partitionId: isShuffleMapTask = $isShuffleMapTask")
     logDebug(s"[DRIVER] Stage $stageId partition $partitionId: readsFromShuffle = $readsFromShuffle")
     logDebug(s"[DRIVER] Stage $stageId partition $partitionId: driverCanExecute = $driverCanExecute")
     logDebug(s"[DRIVER] Stage $stageId partition $partitionId: shouldUseMerkle = $shouldUseMerkle")
-    
-    if (!isFinalStage && useMerkleVerification) {
-      logInfo(s"[DRIVER] Stage $stageId is intermediate - using FULL-TASK verification")
-    }
+
     if (!driverCanExecute) {
       logInfo(s"[DRIVER] Stage $stageId involves shuffle operations - delegating to executor")
     }
@@ -731,7 +714,7 @@ object TaskResultVerificationManager extends Logging {
           executeOnDriver(stageId, index1, index2, partitionId)
       }
     } else {
-      // Full task recomputation (MERKLE_VERIFICATION=false or NOT final stage or driver cannot execute)
+      // Full task recomputation (MERKLE_VERIFICATION=false or driver cannot execute)
       if (!driverCanExecute) {
         logWarning(s"[DRIVER] Driver cannot execute stage $stageId - delegating to executor full-task verification")
         logWarning(s"[DRIVER] Switching to executor for full-task verification")

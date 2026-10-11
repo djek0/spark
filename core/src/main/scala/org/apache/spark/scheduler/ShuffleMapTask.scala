@@ -139,6 +139,18 @@ private[spark] class ShuffleMapTask(
     result
   }
 
+  /**
+   * Chunk verification: the stage's iterator for this partition WITHOUT the shuffle writer, so a
+   * verifier writes no shuffle output.
+   */
+  private[spark] def iteratorForVerification(context: TaskContext): Iterator[_] = {
+    val ser = SparkEnv.get.closureSerializer.newInstance()
+    // ._1 as in runTask (rddAndDep._1): no tuple pattern over existential types
+    val rdd = ser.deserialize[(RDD[_], ShuffleDependency[_, _, _])](
+      ByteBuffer.wrap(taskBinary.value), Thread.currentThread.getContextClassLoader)._1
+    rdd.iterator(partition, context)
+  }
+
   override def preferredLocations: Seq[TaskLocation] = preferredLocs
 
   override def toString: String = "ShuffleMapTask(%d, %d)".format(stageId, partitionId)
