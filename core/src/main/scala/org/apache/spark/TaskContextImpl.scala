@@ -80,6 +80,12 @@ private[spark] class TaskContextImpl(
   /** A full-task verification recompute: traced like a replica, but never writes trace files. */
   @transient private[spark] var fullTaskVerifier: Boolean = false
 
+  /** Fault injection: this task's fault (verification.FaultInjection), or null. */
+  @transient private[spark] var fault: org.apache.spark.verification.Fault = null
+
+  /** A ShuffleMapTask's context (BYZANTINE_STAGES); set by ShuffleMapTask.runTask. */
+  @transient private[spark] var isMapTask: Boolean = false
+
   /** List of callback functions to execute when the task completes. */
   @transient private val onCompleteCallbacks = new ArrayBuffer[TaskCompletionListener]
 

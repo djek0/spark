@@ -209,26 +209,6 @@ private[spark] class Executor(
   private val runningTasks = new ConcurrentHashMap[Long, TaskRunner]
 
   /**
-   * Extract worker ID from Java thread ID for logging and identification.
-   * Also detects if the current thread is from the dedicated verification pool.
-   * 
-   * @param originalThreadName The original thread name before TaskRunner overrides it
-   * @return tuple of (worker ID, isVerificationPoolThread)
-   */
-  private def getLocalWorkerIdFromThread(originalThreadName: String): (Int, Boolean) = {
-    val threadId = Thread.currentThread().getId()
-    
-    // Check if this thread is from the trusted verification pool using the ORIGINAL name
-    // (TaskRunner.run() overrides the thread name, so we must check before that happens)
-    val isTrustedVerificationThread = originalThreadName.contains("TRUSTED verification worker")
-    
-    // Use thread ID modulo 100 to get a stable worker ID in 0-99 range
-    val workerId = (threadId % 100).toInt
-    
-    (workerId, isTrustedVerificationThread)
-  }
-
-  /**
    * When an executor is unable to send heartbeats to the driver more than `HEARTBEAT_MAX_FAILURES`
    * times, it should kill itself. The default value is 60. For example, if max failures is 60 and
    * heartbeat interval is 10s, then it will try to send heartbeats for up to 600s (10 minutes).
@@ -509,8 +489,6 @@ private[spark] class Executor(
     override def run(): Unit = {
       setMDCForTask(taskName, mdcProperties)
       threadId = Thread.currentThread.getId
-      // Capture original thread name BEFORE we override it (to detect verification pool threads)
-      val originalThreadName = Thread.currentThread.getName
       Thread.currentThread.setName(threadName)
       val threadMXBean = ManagementFactory.getThreadMXBean
       val taskMemoryManager = new TaskMemoryManager(env.memoryManager, taskId)
@@ -632,86 +610,6 @@ private[spark] class Executor(
         val resultSer = env.serializer.newInstance()
         val beforeSerializationNs = System.nanoTime()
         var valueBytes = resultSer.serialize(value)
-
-        /**
-         * BYZANTINE FAULT INJECTION FOR TESTING
-         * =====================================
-         *
-         * We want to inject a DIFFERENT result to trigger Byzantine fault detection,
-         * but we MUST preserve the same TYPE as the original result.
-         *
-         *
-         * Driver expects a curtain type in order to diserialize the result correctly,
-         * more specifically JobWaiter.taskSucceeded() casts the result: result.asInstanceOf[T]
-         * If we send wrong type we get ClassCastException at runtime
-         * So we modify the BYTES (changing the hash) but keep the TYPE structure intact
-         */
-        // Skip Byzantine behavior for verification tasks
-        // Rational Byzantine executors would never corrupt verification infrastructure
-        val taskClassName = task.getClass.getName
-        val isVerificationTask = taskClassName.contains("VerificationTask")
-
-        // Read Byzantine interval at task execution time
-        // BYZANTINE_PROBABILITY=N means "every Nth task is Byzantine"
-        // Examples: 2=every 2nd task (50%), 3=every 3rd task (33%), 1=all tasks (100%)
-        val byzantineInterval = if (honestFlag == "False" && !isVerificationTask) {
-          sys.env.get("BYZANTINE_PROBABILITY") match {
-            case Some(intervalStr) =>
-              try {
-                val interval = intervalStr.toInt
-                if (interval > 0) {
-                  logInfo(s"[BYZANTINE CONFIG] Using interval from ENV: every ${interval}th task is Byzantine")
-                  interval
-                } else {
-                  logInfo(s"[BYZANTINE CONFIG] Invalid interval '$interval', no Byzantine behavior")
-                  0
-                }
-              } catch {
-                case _: NumberFormatException =>
-                  logInfo(s"[BYZANTINE CONFIG] Invalid ENV value '$intervalStr', using default Byzantine behavior, every 3rd task is Byzantine")
-                  10
-              }
-            case None =>
-              logInfo(s"[BYZANTINE CONFIG] Using default interval : every 10nth task is Byzantine")
-              10
-          }
-        } else {
-          0   // Honest mode - no Byzantine behavior
-        }
-        
-        // PHASE 2: Simplified Byzantine selection (verification tasks run on dedicated pool)
-        val (localWorkerId, isTrustedVerificationThread) = getLocalWorkerIdFromThread(originalThreadName)
-        
-        // Get task index for replica differentiation
-        val taskIndex = taskDescription.index
-        
-        // Byzantine selection: Simple partition-based + index-based selection
-        // No trusted worker concept needed since verification tasks run on separate pool
-        val isLocalMode = env.conf.get("spark.master", "local").startsWith("local")
-        val shouldBeByzantine = if (byzantineInterval > 0 && !isVerificationTask) {
-          if (isLocalMode) {
-            // Local mode: both replicas may land on same executor (isRelativeOnSameNode is disabled)
-            // Only corrupt first replica (even index) so there is always one honest replica to compare against
-            (task.partitionId % byzantineInterval == 0) && (taskIndex % 2 == 0)
-          } else {
-            // Cluster mode: isRelativeOnSameNode now correctly enforces replica separation across hosts,
-            // so corrupt all matching partitions regardless of replica index
-            task.partitionId % byzantineInterval == 0
-          }
-        } else {
-          false  // Honest mode or verification task
-        }
-        
-        // Log Byzantine selection decision
-        if (honestFlag == "False" && !isVerificationTask) {
-          logInfo(s"[BYZANTINE SELECTION] Task $taskId (${taskClassName}): " +
-            s"workerId=$localWorkerId, partitionId=${task.partitionId}, taskIndex=$taskIndex, " +
-            s"byzantineInterval=$byzantineInterval, willBeByzantine=$shouldBeByzantine")
-        }
-        
-
-
-
         val afterSerializationNs = System.nanoTime()
 
         // Deserialization happens in two parts: first, we deserialize a Task object, which
@@ -795,39 +693,11 @@ private[spark] class Executor(
           TaskResultVerificationManager.computeTaskResultHash(valueBytes).toLong
         }
         
-        // BYZANTINE FAULT INJECTION: Corrupt hash only, keep valueBytes intact
-        val hashValueCandidate = if (honestFlag == "False" && shouldBeByzantine && !isVerificationTask) {
-          logWarning(s"[BYZANTINE CONFIG] Task $taskId is Byzantine (taskId % $byzantineInterval == 0)")
-          logWarning(s"[BYZANTINE INJECTION] *** CORRUPTING TASK $taskId *** (${taskClassName}, partition ${task.partitionId})")
-          logWarning(s"[BYZANTINE TEST] TRYING TO CHEAT - EXECUTOR: $taskId - corrupting hash only, keeping result bytes valid")
-          
-          // Generate random bit pattern for hash corruption
-          val random = new scala.util.Random(taskId) // Seed with taskId for reproducibility
-          var randomBitPattern = random.nextLong()
-          // Ensure pattern is never zero (XOR with 0 = no corruption!)
-          if (randomBitPattern == 0L) randomBitPattern = 1L
-          
-          // Generate Byzantine hash and ensure it ALWAYS differs from honest hash
-          var byzantineHash = honestHash ^ randomBitPattern
-          // Extra safety: if XOR somehow produces same value, use fixed pattern
-          if (byzantineHash == honestHash) {
-            byzantineHash = honestHash ^ 0xDEADBEEFCAFEBABEL
-            logWarning(s"[BYZANTINE TEST] XOR produced same hash! Using fallback pattern")
-          }
-          
-           logWarning(s"[BYZANTINE TEST] Hash corruption: honest=$honestHash -> byzantine=$byzantineHash (XOR with $randomBitPattern)")
-
-          byzantineHash // Return corrupted hash
-        } else {
-          honestHash // Return honest hash
-        }
-        
-        // Chunk digest block (empty when the task has no digest) goes before the hash, so the
-        // hash stays last. The digest is corrupted for exactly the replica whose hash is.
-        val chunkBlock = org.apache.spark.verification.ChunkConfig.trailerFor(
-          task.context,
-          corruptForTest = honestFlag == "False" && shouldBeByzantine && !isVerificationTask)
-        metricPeaks = metricPeaks ++ chunkBlock :+ hashValueCandidate
+        // Chunk digest block (empty when the task has no digest) goes before the executor's own
+        // result hash, which stays last (TaskResultGetter pops it). Faults are computed by the
+        // task itself (verification.FaultInjection).
+        val chunkBlock = org.apache.spark.verification.ChunkConfig.trailerFor(task.context)
+        metricPeaks = metricPeaks ++ chunkBlock :+ honestHash
         // TODO: do not serialize value twice
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)
         val serializedDirectResult = ser.serialize(directResult)
@@ -856,7 +726,7 @@ private[spark] class Executor(
         }
 
         logInfo(s"[EXTRA LOG][in task run] result hash (for TID ${taskId}) serialised:" +
-                s"[${hashValueCandidate.toString}]")
+                s"[${honestHash.toString}]")
 
         executorSource.SUCCEEDED_TASKS.inc(1L)
         setTaskFinishedAndClearInterruptStatus()

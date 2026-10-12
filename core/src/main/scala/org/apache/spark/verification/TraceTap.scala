@@ -109,8 +109,14 @@ private[spark] object TraceTap extends Logging {
 
   /** RDD.iterator, before computing: a task's first call (its stage's top RDD) computes its plan. */
   def enter(rdd: RDD[_], context: TaskContext): Unit = context match {
-    case ctx: TaskContextImpl if ctx.tracePlan == null && ChunkConfig.merkleOn =>
-      ctx.tracePlan = planOf(rdd, ctx)
+    case ctx: TaskContextImpl if ctx.tracePlan == null &&
+        (ChunkConfig.merkleOn || FaultInjection.enabled) =>
+      ctx.fault = FaultInjection.forTask(ctx)
+      // A faulty task gets its plan even with Merkle off: the fault then hits the same element
+      // as in chunks mode. Honest tasks with Merkle off stay vanilla.
+      ctx.tracePlan =
+        if (ChunkConfig.merkleOn || ctx.fault != null) planOf(rdd, ctx)
+        else new TracePlan(false, rdd.id, -1, -1, "not traced")
     case _ =>
   }
 
@@ -126,9 +132,12 @@ private[spark] object TraceTap extends Logging {
   /** RDD.iterator, after computing: the plan's tap fingerprints its elements as they flow. */
   def leave[T](rdd: RDD[T], split: Partition, context: TaskContext, it: Iterator[T]): Iterator[T] =
     context match {
-      case ctx: TaskContextImpl if ctx.tracePlan != null && ctx.tracePlan.eligible &&
-          ctx.tracePlan.tapId == rdd.id =>
-        tapIterator(split, ctx, it)
+      case ctx: TaskContextImpl if ctx.tracePlan != null =>
+        val plan = ctx.tracePlan
+        if (plan.eligible && plan.tapId == rdd.id) tapIterator(split, ctx, it)
+        else if (!plan.eligible && ctx.fault != null && plan.topId == rdd.id) {
+          new FaultyTop(it, ctx, ctx.fault)   // no tap: fault the stage's output
+        } else it
       case _ => it
     }
 
@@ -186,7 +195,11 @@ private[spark] object TraceTap extends Logging {
         ctx.addTaskCompletionListener[Unit](_ => try w.safeClose() catch { case _: Throwable => () })
         w
       } else null
-    new TapIterator(it, ctx, digest, box, writer)
+    if (ctx.fault != null) {
+      new FaultyTap(it, ctx, digest, writer, ctx.fault, FaultInjection.threshold(ctx.fault, ctx))
+    } else {
+      new TapIterator(it, ctx, digest, box, writer)
+    }
   }
 }
 
@@ -233,5 +246,76 @@ private final class TapIterator[T](it: Iterator[T], ctx: TaskContextImpl, digest
     if (box != null) box.add(uid, elem)
     if (writer != null) writer.writeEntry(uid, elem)
     elem
+  }
+}
+
+/**
+ * A faulty replica's tap: the first element at or after the threshold (or the last element, if
+ * the stream ends first) is dropped or replaced, then everything is traced as usual. It holds one
+ * element to see whether it is the last.
+ */
+private final class FaultyTap[T](it: Iterator[T], ctx: TaskContextImpl, digest: ChunkDigest,
+    writer: SafeWriter, fault: Fault, threshold: Long) extends Iterator[T] {
+  private var buf: Any = null
+  private var uid = -1L
+  private var full = false
+
+  private def pull(): Unit = {
+    buf = it.next()
+    uid = ctx.rootPos - 1
+    full = true
+  }
+
+  override def hasNext: Boolean = {
+    if (!full && it.hasNext) pull()
+    if (full && !fault.applied && (uid >= threshold || !it.hasNext)) {
+      fault.applied = true
+      val hit = uid
+      FaultInjection.corrupt(buf) match {
+        case Some(v) if !fault.drop =>
+          buf = v
+          FaultInjection.logInjected(ctx, s"value at uid $hit (position=${fault.position})")
+        case _ =>
+          full = false
+          if (it.hasNext) pull()
+          FaultInjection.logInjected(ctx, s"drop at uid $hit (position=${fault.position})")
+      }
+    }
+    if (!full && digest != null) digest.exhausted = true
+    full
+  }
+
+  override def next(): T = {
+    if (!hasNext) throw new NoSuchElementException("end of stream")
+    full = false
+    val elem = buf.asInstanceOf[T]
+    if (digest != null) digest.add(uid, elem)
+    if (writer != null) writer.writeEntry(uid, elem)
+    elem
+  }
+}
+
+/** A faulty task whose stage has no tap: the first element of the stage's output is faulted. */
+private final class FaultyTop[T](it: Iterator[T], ctx: TaskContextImpl, fault: Fault)
+  extends Iterator[T] {
+  private var held: Option[Any] = None
+
+  override def hasNext: Boolean = {
+    if (!fault.applied && it.hasNext) {
+      fault.applied = true
+      val first = it.next()
+      held = if (fault.drop) None else FaultInjection.corrupt(first)
+      FaultInjection.logInjected(ctx,
+        (if (held.isDefined) "value" else "drop") + " at the first element (stage without a tap)")
+    }
+    held.isDefined || it.hasNext
+  }
+
+  override def next(): T = {
+    if (!hasNext) throw new NoSuchElementException("end of stream")
+    held match {
+      case Some(v) => held = None; v.asInstanceOf[T]
+      case None => it.next()
+    }
   }
 }

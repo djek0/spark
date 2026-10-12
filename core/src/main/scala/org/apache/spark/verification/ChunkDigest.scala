@@ -142,10 +142,6 @@ final class ChunkDigest(val maxChunks: Int) {
     used = (used + 1) >>> 1
   }
 
-  /** Fault injection only: make the box of the last element wrong (a wrong value there). */
-  def corruptForTest(): Unit =
-    if (!invalid && lastUid >= 0) boxes((lastUid >>> shift).toInt) += 0x5DEECE66DL
-
   /** [boxes 0 .. used-1, lastUid, header, MAGIC]: appended to metricPeaks before the hash. */
   def toTrailer: Array[Long] = {
     val out = new Array[Long](used + 3)
@@ -271,10 +267,8 @@ object ChunkConfig {
   }
 
   /** The block to put before the result hash; empty when the task has no digest. */
-  def trailerFor(context: TaskContext, corruptForTest: Boolean): Array[Long] = context match {
-    case impl: TaskContextImpl if impl.chunkDigest != null =>
-      if (corruptForTest) impl.chunkDigest.corruptForTest()
-      impl.chunkDigest.toTrailer
+  def trailerFor(context: TaskContext): Array[Long] = context match {
+    case impl: TaskContextImpl if impl.chunkDigest != null => impl.chunkDigest.toTrailer
     case _ => Array.emptyLongArray
   }
 }
