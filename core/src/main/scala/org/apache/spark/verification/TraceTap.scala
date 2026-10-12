@@ -140,8 +140,12 @@ private[spark] object TraceTap extends Logging {
             new FaultyTop(it, ctx, ctx.fault)   // no tap: fault the stage's output
           } else it
         // A map task's top RDD feeds its shuffle writer: sum every record (W). Outermost, so the
-        // sum sees exactly what the writer gets, faults included
-        if (ctx.isMapTask && plan.topId == rdd.id) RecordSum.wrap(out, ctx) else out
+        // sum sees exactly what the writer gets, faults included. When the tap is the top itself,
+        // the chunk digest already covers those records (A4b), so W is skipped unless asked for
+        val digestCoversTop = plan.eligible && plan.tapId == rdd.id && ctx.chunkDigest != null
+        if (ctx.isMapTask && plan.topId == rdd.id && (RecordSum.always || !digestCoversTop)) {
+          RecordSum.wrap(out, ctx)
+        } else out
       case _ => it
     }
 

@@ -17,14 +17,15 @@
 
 package org.apache.spark.verification
 
-import scala.util.Try
+import java.util.Locale
 
 import org.apache.spark.{TaskContext, TaskContextImpl}
 
 /**
  * W, a map task's record sum: the wrap-around sum of one 64-bit hash per record its shuffle
  * writer received, plus their count. It goes into the map-stage consensus hash
- * (ResultHash.ofMapOutput) in every mode. Only computing every record produces it.
+ * (ResultHash.ofMapOutput), in full-task and chunks mode alike, wherever the chunk digest does
+ * not already cover those records (MAP_RECORD_SUM). Only computing every record produces it.
  *
  * Order-free twice over: the sum ignores the order of the records, and collections inside a
  * record are hashed order-free (recordHash), because a record may hold a collection filled in
@@ -54,9 +55,21 @@ private[spark] object RecordSum {
   /** Ends the record-sum block; distinct from ChunkDigest.MAGIC. */
   val MAGIC: Long = 0x5245434F52445355L
 
-  /** MAP_RECORD_SUM=false turns W off (thesis measurement of the sizes-only gap). Executors. */
-  lazy val enabled: Boolean =
-    Try(scala.util.Properties.envOrElse("MAP_RECORD_SUM", "true").trim.toBoolean).getOrElse(true)
+  /**
+   * MAP_RECORD_SUM (executors; set it the same on all of them):
+   *  - covered (default, or true): W wherever the chunk digest does not already cover exactly
+   *    what the shuffle writer receives
+   *  - always: W in every map task, digest or not
+   *  - off (or false): no W; only to measure the system without it (the sizes-only gap)
+   */
+  private lazy val mode: String =
+    scala.util.Properties.envOrElse("MAP_RECORD_SUM", "covered").trim.toLowerCase(Locale.ROOT) match {
+      case "off" | "false" => "off"
+      case "always" => "always"
+      case _ => "covered"
+    }
+  lazy val enabled: Boolean = mode != "off"
+  lazy val always: Boolean = mode == "always"
 
   /**
    * One record's term. ElementHash.hash64, except that a collection is hashed as a multiset: the

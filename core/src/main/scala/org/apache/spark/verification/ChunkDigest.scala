@@ -92,7 +92,10 @@ object ElementHash {
     // Object.toString carries the identity hash, which differs between honest replicas
     case other =>
       if (ownText.get(other.getClass).booleanValue) {
-        mix64(other.toString.hashCode.toLong ^ (0xA8L << 32))
+        // A toString that throws must neither fail the task nor stop the digest or W: this one
+        // element then hashes by its class name, and the elements after it are still covered
+        try mix64(other.toString.hashCode.toLong ^ (0xA8L << 32))
+        catch { case NonFatal(_) => mix64(hashString(other.getClass.getName) ^ (0xA9L << 32)) }
       } else {
         mix64(hashString(other.getClass.getName) ^ (0xA9L << 32))
       }
