@@ -68,34 +68,37 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
                   "Tasks result size has exceeded maxResultSize"))
                 return
               }
+              // A ResultTask's consensus hash is taken here, from the bytes the driver received,
+              // before value() deserializes them (deserializing moves the buffer's position)
+              val task = taskSetManager.tasks(taskSetManager.taskInfos(tid).index)
+              val bytesHash = task match {
+                case _: ResultTask[_, _] =>
+                  org.apache.spark.verification.ResultHash.ofBytes(directResult.valueBytes)
+                case _ => null
+              }
               // deserialize "value" without holding any lock so that it won't block other threads.
               // We should call it here, so that when it's called again in
               // "TaskSetManager.handleSuccessfulTask", it does not need to deserialize the value.
               directResult.value(taskResultSerializer.get())
-              val hashSize: Long = directResult.metricPeaks(directResult.metricPeaks.length-1)
+              val executorHash: Long = directResult.metricPeaks(directResult.metricPeaks.length-1)
               directResult.metricPeaks = directResult.metricPeaks.take(directResult.metricPeaks.length-1)
-              // Chunk digest block (if any) sits right before the hash
+              // Record-sum block (W; map tasks) sits right before the hash, the chunk block before it
+              val (recordSum, peaksWithoutSum) =
+                org.apache.spark.verification.RecordSum.fromTrailer(directResult.metricPeaks)
+              directResult.metricPeaks = peaksWithoutSum
               val (chunkDigest, peaksWithoutDigest) =
                 org.apache.spark.verification.ChunkDigest.fromTrailer(directResult.metricPeaks)
               directResult.metricPeaks = peaksWithoutDigest
+              // Executors send exactly numMetrics peaks: anything else is a trailer the driver misparsed
+              checkTrailer(tid, directResult.metricPeaks)
 //              logInfo("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
 //              logInfo(s"[EXTRA LOG][TASK RESULT GETTER] deserialized result: for task ${tid}")
 
 //              println(hashValueCandidate)
 //              println(s"[EXTRA LOG] hash ${hashValueCandidate.hashCode().toString} FOR TID $tid, original byte array size $resultSize")
 
-              // Only store hash for original tasks (ResultTask, ShuffleMapTask), not verification tasks
-              val taskInfo = taskSetManager.taskInfos(tid)
-              val task = taskSetManager.tasks(taskInfo.index)
-              task match {
-                case _: ResultTask[_, _] | _: ShuffleMapTask =>
-                  logInfo("Calling addNewResultTasks from task verification manager")
-                  // Digest before hash: whoever sees the hash also sees the digest
-                  chunkDigest.foreach(TaskResultVerificationManager.storeChunkDigest(tid, _))
-                  TaskResultVerificationManager.addNewResultForTid(tid, hashSize.toString)
-                case _ =>
-                  logDebug(s"[VERIFICATION] Skipping adding result hash for verification task ${task.getClass.getSimpleName} (taskId=$tid)")
-              }
+              recordReplicaResult(tid, task, bytesHash, directResult.value(), chunkDigest, recordSum,
+                executorHash)
               (directResult, serializedData.limit())
             case IndirectTaskResult(blockId, size) =>
               if (!taskSetManager.canFetchMoreResults(size)) {
@@ -119,31 +122,33 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
               }
               val deserializedResult = serializer.get().deserialize[DirectTaskResult[_]](
                 serializedTaskResult.get.toByteBuffer)
+              // The consensus hash of a ResultTask: from the received bytes, before value()
+              val task = taskSetManager.tasks(taskSetManager.taskInfos(tid).index)
+              val bytesHash = task match {
+                case _: ResultTask[_, _] =>
+                  org.apache.spark.verification.ResultHash.ofBytes(deserializedResult.valueBytes)
+                case _ => null
+              }
               // force deserialization of referenced value
               deserializedResult.value(taskResultSerializer.get())
               sparkEnv.blockManager.master.removeBlock(blockId)
 //              logInfo("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
 //              logInfo(s"[EXTRA LOG][TASK RESULT GETTER 2] deserialized result: for task ${tid}")
 //              println(Arrays.toString(deserializedResult.valueBytes.array()).hashCode().toString)
-              
-              // Store hash for IndirectTaskResult as well (for large results)
-              val hashSize: Long = deserializedResult.metricPeaks(deserializedResult.metricPeaks.length-1)
+
+              // The trailer of an IndirectTaskResult, popped the same way (large results)
+              val executorHash: Long = deserializedResult.metricPeaks(deserializedResult.metricPeaks.length-1)
               deserializedResult.metricPeaks = deserializedResult.metricPeaks.take(deserializedResult.metricPeaks.length-1)
+              val (recordSum, peaksWithoutSum) =
+                org.apache.spark.verification.RecordSum.fromTrailer(deserializedResult.metricPeaks)
+              deserializedResult.metricPeaks = peaksWithoutSum
               val (chunkDigest, peaksWithoutDigest) =
                 org.apache.spark.verification.ChunkDigest.fromTrailer(deserializedResult.metricPeaks)
               deserializedResult.metricPeaks = peaksWithoutDigest
-              val taskInfo = taskSetManager.taskInfos(tid)
-              val task = taskSetManager.tasks(taskInfo.index)
-              task match {
-                case _: ResultTask[_, _] | _: ShuffleMapTask =>
-                  logInfo(s"[INDIRECT] Calling addNewResultTasks for large result (TID $tid)")
-                  // Digest before hash: whoever sees the hash also sees the digest
-                  chunkDigest.foreach(TaskResultVerificationManager.storeChunkDigest(tid, _))
-                  TaskResultVerificationManager.addNewResultForTid(tid, hashSize.toString)
-                case _ =>
-                  logDebug(s"[VERIFICATION] Skipping adding result hash for verification task ${task.getClass.getSimpleName} (taskId=$tid)")
-              }
-              
+              checkTrailer(tid, deserializedResult.metricPeaks)
+              recordReplicaResult(tid, task, bytesHash, deserializedResult.value(), chunkDigest,
+                recordSum, executorHash)
+
               (deserializedResult, size)
           }
 
@@ -173,6 +178,37 @@ private[spark] class TaskResultGetter(sparkEnv: SparkEnv, scheduler: TaskSchedul
         }
       }
     })
+  }
+
+  private def checkTrailer(tid: Long, peaks: Array[Long]): Unit = {
+    val expected = org.apache.spark.metrics.ExecutorMetricType.numMetrics
+    if (peaks.length != expected) {
+      logWarning(s"[TRAILER] task $tid: ${peaks.length} metric peaks after parsing, expected $expected")
+    }
+  }
+
+  /**
+   * A replica's result: store its chunk digest, then its consensus hash, computed here on the
+   * driver (digest first, so whoever sees the hash also sees the digest). Other tasks: nothing.
+   */
+  private def recordReplicaResult(tid: Long, task: Task[_], bytesHash: String, value: Any,
+      digest: Option[org.apache.spark.verification.DigestView],
+      recordSum: Option[org.apache.spark.verification.RecordSumView], executorHash: Long): Unit = {
+    val hash = task match {
+      case _: ResultTask[_, _] => bytesHash
+      case smt: ShuffleMapTask if smt.numReducePartitions > 0 =>
+        org.apache.spark.verification.ResultHash.ofMapOutput(
+          smt.blockSizesForHash(value.asInstanceOf[MapStatus]), digest, recordSum)
+      case _: ShuffleMapTask =>
+        // Never expected: DAGScheduler sets numReducePartitions when it creates map tasks
+        logError(s"[HASH] map task $tid has no reduce partition count; using its reported hash")
+        s"executor:$executorHash"
+      case _ =>
+        logDebug(s"[VERIFICATION] No result hash for ${task.getClass.getSimpleName} (taskId=$tid)")
+        return
+    }
+    digest.foreach(TaskResultVerificationManager.storeChunkDigest(tid, _))
+    TaskResultVerificationManager.addNewResultForTid(tid, hash)
   }
 
   def enqueueFailedTask(taskSetManager: TaskSetManager, tid: Long, taskState: TaskState,

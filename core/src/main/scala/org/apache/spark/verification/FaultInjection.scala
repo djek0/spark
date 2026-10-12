@@ -41,7 +41,7 @@ private[spark] final class Fault(val drop: Boolean, val position: String) {
  *  - BYZANTINE_FAULT = drop | value
  *  - BYZANTINE_POSITION = last | first | middle | random (middle and random need the root's size,
  *    known for parallelize roots; otherwise last)
- *  - BYZANTINE_STAGES = result | all (map stages too)
+ *  - BYZANTINE_STAGES = all (default) | result
  */
 private[spark] object FaultInjection extends Logging {
   private def env(k: String, d: String): String =
@@ -61,7 +61,7 @@ private[spark] object FaultInjection extends Logging {
     case p @ ("first" | "middle" | "random" | "last") => p
     case _ => "last"
   }
-  private lazy val allStages: Boolean = env("BYZANTINE_STAGES", "result") == "all"
+  private lazy val allStages: Boolean = env("BYZANTINE_STAGES", "all") == "all"
 
   /** This task's fault, or null: an honest JVM, a verification context, or not selected. */
   def forTask(ctx: TaskContextImpl): Fault = {

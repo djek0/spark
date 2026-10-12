@@ -20,6 +20,7 @@ package org.apache.spark.scheduler
 import java.util.Properties
 import org.apache.spark._
 import org.apache.spark.internal.Logging
+import org.apache.spark.verification.ResultHash
 import scala.util.control.NonFatal
 
 /**
@@ -140,22 +141,19 @@ private[spark] class VerificationTask(
     val fullTaskTime = (System.nanoTime() - fullTaskStartTime) / 1e9
     logWarning(s"[PERF-FULLTASK] Stage $stageId partition $partitionId: ${fullTaskTime}s")
 
-    // Use same hashing logic as Executor.scala for consistency
-    val verifierHash = if (originalTask.isInstanceOf[ShuffleMapTask]) {
-      // For ShuffleMapTask: Hash block sizes (deterministic across replicas)
-      // MapStatus includes BlockManagerId which is non-deterministic
-      val mapStatus = result.asInstanceOf[MapStatus]
-
-      // Exactly one size per reduce partition (see ShuffleMapTask.blockSizesForHash)
-      val blockSizes = originalTask.asInstanceOf[ShuffleMapTask].blockSizesForHash(mapStatus)
-      val sizeString = blockSizes.mkString(",")
-      logInfo(s"[VERIFICATION SHUFFLE HASH] Hashing ${blockSizes.length} block sizes: ${sizeString.take(200)}...")
-      TaskResultVerificationManager.computeTaskResultHash(
-        java.nio.ByteBuffer.wrap(sizeString.getBytes("UTF-8"))
-      )
-    } else {
-      // For ResultTask: Hash the full serialized result (current behavior)
-      TaskResultVerificationManager.computeTaskResultHash(result)
+    // The same consensus hash the driver computes for the replicas (verification.ResultHash)
+    val verifierHash = originalTask match {
+      case smt: ShuffleMapTask =>
+        // The verifier's own digest and record sum, computed by its runTask like a replica's
+        val (digest, recordSum) = context match {
+          case c: TaskContextImpl =>
+            (Option(c.chunkDigest).map(_.view), Option(c.recordSum).map(_.view))
+          case _ => (None, None)
+        }
+        ResultHash.ofMapOutput(smt.blockSizesForHash(result.asInstanceOf[MapStatus]), digest,
+          recordSum)
+      case _ =>
+        ResultHash.ofValue(result)
     }
 
     logInfo(s"[VERIFICATION] Verifier hash: $verifierHash")

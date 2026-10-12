@@ -10,7 +10,7 @@ import org.apache.spark.internal.Logging
 import scala.util.control.NonFatal
 import org.apache.spark.{TaskContext, TaskContextImpl}
 import org.apache.spark.executor.TaskMetrics
-import org.apache.spark.verification.{ChunkConfig, ChunkDigest, DigestView}
+import org.apache.spark.verification.{ChunkConfig, ChunkDigest, DigestView, ResultHash}
 
 
 object TaskResultVerificationManager extends Logging {
@@ -134,12 +134,6 @@ object TaskResultVerificationManager extends Logging {
    */
   def computeTaskResultHash(valueBytes: ByteBuffer): String = {
     java.util.Arrays.hashCode(valueBytes.array()).toLong.toString
-  }
-
-  def computeTaskResultHash(result: Any): String = {
-    val ser = SparkEnv.get.closureSerializer.newInstance()
-    val valueBytes = ser.serialize(result)
-    computeTaskResultHash(valueBytes)
   }
 
   /**
@@ -888,16 +882,13 @@ object TaskResultVerificationManager extends Logging {
           val driverTaskTime = (System.nanoTime() - driverTaskStartTime) / 1e9
           logWarning(s"[PERF-FULLTASK-DRIVER] Stage $stageId partition $partitionId: ${driverTaskTime}s")
 
-          // Compare using serialized result hashes; ShuffleMapTask: block sizes, as Executor.scala
-          val driverHash = if (task.isInstanceOf[ShuffleMapTask]) {
-            val mapStatus = driverResult.asInstanceOf[MapStatus]
-            // Exactly one size per reduce partition (see ShuffleMapTask.blockSizesForHash)
-            val blockSizes = task.asInstanceOf[ShuffleMapTask].blockSizesForHash(mapStatus)
-            val sizeString = blockSizes.mkString(",")
-            logInfo(s"[DRIVER SHUFFLE HASH] Hashing ${blockSizes.length} block sizes: ${sizeString.take(200)}...")
-            computeTaskResultHash(ByteBuffer.wrap(sizeString.getBytes("UTF-8")))
-          } else {
-            computeTaskResultHash(driverResult)
+          // The same consensus hash the driver computes for the replicas (verification.ResultHash)
+          val driverHash = task match {
+            case smt: ShuffleMapTask =>
+              ResultHash.ofMapOutput(smt.blockSizesForHash(driverResult.asInstanceOf[MapStatus]),
+                Option(driverTaskContext.chunkDigest).map(_.view),
+                Option(driverTaskContext.recordSum).map(_.view))
+            case _ => ResultHash.ofValue(driverResult)
           }
           logInfo(s"[HASH LOOKUP] Looking up hashes for stage $stageId: idx$index1=(${stageId},$index1), idx$index2=(${stageId},$index2)")
           logInfo(s"[HASH LOOKUP] Current hash map size: ${stageIndexToResultHash.size}, contains idx$index1: ${stageIndexToResultHash.contains((stageId, index1))}, contains idx$index2: ${stageIndexToResultHash.contains((stageId, index2))}")

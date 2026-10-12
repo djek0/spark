@@ -86,6 +86,9 @@ private[spark] class TaskContextImpl(
   /** A ShuffleMapTask's context (BYZANTINE_STAGES); set by ShuffleMapTask.runTask. */
   @transient private[spark] var isMapTask: Boolean = false
 
+  /** W: a map task's record sum (verification.RecordSum), or null. */
+  @transient private[spark] var recordSum: org.apache.spark.verification.RecordSum = null
+
   /** List of callback functions to execute when the task completes. */
   @transient private val onCompleteCallbacks = new ArrayBuffer[TaskCompletionListener]
 

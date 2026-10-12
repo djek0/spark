@@ -110,7 +110,7 @@ private[spark] object TraceTap extends Logging {
   /** RDD.iterator, before computing: a task's first call (its stage's top RDD) computes its plan. */
   def enter(rdd: RDD[_], context: TaskContext): Unit = context match {
     case ctx: TaskContextImpl if ctx.tracePlan == null &&
-        (ChunkConfig.merkleOn || FaultInjection.enabled) =>
+        (ChunkConfig.merkleOn || FaultInjection.enabled || ctx.isMapTask) =>
       ctx.fault = FaultInjection.forTask(ctx)
       // A faulty task gets its plan even with Merkle off: the fault then hits the same element
       // as in chunks mode. Honest tasks with Merkle off stay vanilla.
@@ -134,10 +134,14 @@ private[spark] object TraceTap extends Logging {
     context match {
       case ctx: TaskContextImpl if ctx.tracePlan != null =>
         val plan = ctx.tracePlan
-        if (plan.eligible && plan.tapId == rdd.id) tapIterator(split, ctx, it)
-        else if (!plan.eligible && ctx.fault != null && plan.topId == rdd.id) {
-          new FaultyTop(it, ctx, ctx.fault)   // no tap: fault the stage's output
-        } else it
+        val out =
+          if (plan.eligible && plan.tapId == rdd.id) tapIterator(split, ctx, it)
+          else if (!plan.eligible && ctx.fault != null && plan.topId == rdd.id) {
+            new FaultyTop(it, ctx, ctx.fault)   // no tap: fault the stage's output
+          } else it
+        // A map task's top RDD feeds its shuffle writer: sum every record (W). Outermost, so the
+        // sum sees exactly what the writer gets, faults included
+        if (ctx.isMapTask && plan.topId == rdd.id) RecordSum.wrap(out, ctx) else out
       case _ => it
     }
 

@@ -697,7 +697,8 @@ private[spark] class Executor(
         // result hash, which stays last (TaskResultGetter pops it). Faults are computed by the
         // task itself (verification.FaultInjection).
         val chunkBlock = org.apache.spark.verification.ChunkConfig.trailerFor(task.context)
-        metricPeaks = metricPeaks ++ chunkBlock :+ honestHash
+        val sumBlock = org.apache.spark.verification.RecordSum.trailerFor(task.context)
+        metricPeaks = metricPeaks ++ chunkBlock ++ sumBlock :+ honestHash
         // TODO: do not serialize value twice
         val directResult = new DirectTaskResult(valueBytes, accumUpdates, metricPeaks)
         val serializedDirectResult = ser.serialize(directResult)

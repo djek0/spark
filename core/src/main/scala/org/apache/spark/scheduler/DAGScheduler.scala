@@ -1557,15 +1557,17 @@ private[spark] class DAGScheduler(
             logDebug(s"Creating 2 replica ShuffleMapTasks for partition $id")
             stage.pendingPartitions += id
             // Create 2 tasks for the same partition (both work on same data)
-            Seq[Task[_]](
+            val replicas = Seq(
               new ShuffleMapTask(stage.id, stage.latestInfo.attemptNumber,
                 taskBinary, part, locs, properties, serializedTaskMetrics, Option(jobId),
-                Option(sc.applicationId), sc.applicationAttemptId, stage.rdd.isBarrier())
-              ,
+                Option(sc.applicationId), sc.applicationAttemptId, stage.rdd.isBarrier()),
               new ShuffleMapTask(stage.id, stage.latestInfo.attemptNumber,
                 taskBinary, part, locs, properties, serializedTaskMetrics, Option(jobId),
-                Option(sc.applicationId), sc.applicationAttemptId, stage.rdd.isBarrier())
-            )
+                Option(sc.applicationId), sc.applicationAttemptId, stage.rdd.isBarrier()))
+            // The driver hashes the block sizes it receives (TaskResultGetter); executors set their
+            // own copy of this transient field in runTask
+            replicas.foreach(_.numReducePartitions = stage.shuffleDep.partitioner.numPartitions)
+            replicas
           }
         case stage: ResultStage =>
           logDebug(s"Processing ResultStage ${stage.id}")

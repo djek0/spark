@@ -43,6 +43,14 @@ object ElementHash {
     z ^ (z >>> 31)
   }
 
+  /** Whether a class overrides Object.toString; looked up once per class, then cached. */
+  private val ownText: ClassValue[java.lang.Boolean] = new ClassValue[java.lang.Boolean] {
+    override def computeValue(c: Class[_]): java.lang.Boolean =
+      java.lang.Boolean.valueOf(
+        try c.getMethod("toString").getDeclaringClass != classOf[Object]
+        catch { case _: SecurityException => false })
+  }
+
   def hash64(v: Any): Long = v match {
     case null => 0x6E756C6CL
     case x: Long => mix64(x)
@@ -80,8 +88,14 @@ object ElementHash {
       val n = p.productArity; var h = 0xA7L ^ n; var i = 0
       while (i < n) { h = mix64(h ^ hash64(p.productElement(i))); i += 1 }
       h
-    // Same fallback as formatValueWithArrays: the element's text.
-    case other => mix64(other.toString.hashCode.toLong ^ (0xA8L << 32))
+    // The element's text, as formatValueWithArrays uses it, but only if its class defines one:
+    // Object.toString carries the identity hash, which differs between honest replicas
+    case other =>
+      if (ownText.get(other.getClass).booleanValue) {
+        mix64(other.toString.hashCode.toLong ^ (0xA8L << 32))
+      } else {
+        mix64(hashString(other.getClass.getName) ^ (0xA9L << 32))
+      }
   }
 
   /** FNV-1a over the chars, then mixed. */
@@ -151,6 +165,10 @@ final class ChunkDigest(val maxChunks: Int) {
     out(used + 2) = ChunkDigest.MAGIC
     out
   }
+
+  /** This digest as the driver sees it after fromTrailer: lets a verifier hash it the same way. */
+  def view: DigestView =
+    DigestView(shift, java.util.Arrays.copyOf(boxes, used), lastUid, exhausted, invalid)
 }
 
 /** Driver side: an immutable copy of one replica's digest. */
